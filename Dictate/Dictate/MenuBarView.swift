@@ -38,7 +38,7 @@ struct MenuBarView: View {
             VocabularyEditorView(manager: manager)
         }
         .sheet(isPresented: $showingApiKeyEditor) {
-            ApiKeyEditorView(manager: manager)
+            ApiKeyEditorView(manager: manager, provider: manager.provider)
         }
     }
 
@@ -85,6 +85,11 @@ private struct MainMenuContent: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
+            if let issue = manager.lastIssue {
+                Divider()
+                IssueRow(issue: issue, dismiss: manager.dismissIssue)
+            }
+
             Divider()
 
             MenuPageButton(
@@ -115,6 +120,15 @@ private struct MainMenuContent: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
 
+            Picker("Engine", selection: $manager.provider) {
+                ForEach(TranscriptionProvider.allCases, id: \.self) { provider in
+                    Text(provider.label).tag(provider)
+                }
+            }
+            .pickerStyle(.menu)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+
             Picker("Language", selection: $manager.language) {
                 Text("Auto").tag(Language.auto)
                 Text("Deutsch").tag(Language.de)
@@ -138,7 +152,7 @@ private struct MainMenuContent: View {
             HStack {
                 Image(systemName: manager.hasApiKey ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .foregroundColor(manager.hasApiKey ? .green : .orange)
-                Text(manager.hasApiKey ? "API Key configured" : "GROQ_API_KEY missing")
+                Text(manager.hasApiKey ? "\(manager.provider.shortName) key configured" : "\(manager.provider.shortName) key missing")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -167,6 +181,37 @@ private struct MainMenuContent: View {
     private var vocabularyPreview: String {
         let terms = manager.vocabulary.prefix(3).joined(separator: ", ")
         return terms + (manager.vocabulary.count > 3 ? "..." : "")
+    }
+}
+
+private struct IssueRow: View {
+    let issue: DictateIssue
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(issue.isWarning ? .orange : .red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(issue.message)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Text(issue.date.formatted(date: .omitted, time: .shortened))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 4)
+            Button(action: dismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background((issue.isWarning ? Color.orange : Color.red).opacity(0.1))
     }
 }
 
@@ -441,17 +486,19 @@ struct VocabularyEditorView: View {
 
 struct ApiKeyEditorView: View {
     @ObservedObject var manager: DictateManager
+    let provider: TranscriptionProvider
     @Environment(\.dismiss) var dismiss
     @State private var apiKey: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Groq API Key")
+            Text("\(provider.shortName) API Key")
                 .font(.headline)
 
-            Text("Get a free key at console.groq.com/keys")
+            Text(provider.keyHint)
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             SecureField("API Key", text: $apiKey)
                 .textFieldStyle(.roundedBorder)
@@ -465,7 +512,7 @@ struct ApiKeyEditorView: View {
                 Spacer()
 
                 Button("Save") {
-                    manager.setApiKey(apiKey)
+                    manager.setApiKey(apiKey, for: provider)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -473,7 +520,7 @@ struct ApiKeyEditorView: View {
             }
         }
         .padding()
-        .frame(width: 350, height: 150)
+        .frame(width: 350, height: 170)
     }
 }
 

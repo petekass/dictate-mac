@@ -26,9 +26,21 @@ struct MenuBarIconView: View {
 
     var body: some View {
         Image(systemName: manager.statusIcon)
-            .symbolRenderingMode(manager.isRecording ? .palette : .hierarchical)
-            .foregroundStyle(manager.isRecording ? .red : .primary)
-            .id("\(manager.statusIcon)-\(manager.isRecording)-\(manager.isProcessing)")
+            .symbolRenderingMode(usesColor ? .palette : .hierarchical)
+            .foregroundStyle(iconColor)
+            .id("\(manager.statusIcon)-\(manager.isRecording)-\(manager.isProcessing)-\(manager.lastIssue?.date.timeIntervalSince1970 ?? 0)")
+    }
+
+    private var usesColor: Bool {
+        manager.isRecording || (!manager.isProcessing && manager.lastIssue != nil)
+    }
+
+    private var iconColor: Color {
+        if manager.isRecording { return .red }
+        if !manager.isProcessing, let issue = manager.lastIssue {
+            return issue.isWarning ? .orange : .red
+        }
+        return .primary
     }
 }
 

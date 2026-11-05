@@ -54,12 +54,12 @@ class SoundGenerator {
         return samples
     }
 
-    private func generateSequence(frequencies: [Double], gap: Double = 0.02) -> [Float] {
+    private func generateSequence(frequencies: [Double], gap: Double = 0.02, duration: Double = 0.06) -> [Float] {
         var result = [Float]()
         let gapSamples = Int(sampleRate * gap)
 
         for (index, freq) in frequencies.enumerated() {
-            result.append(contentsOf: generateTone(frequency: freq))
+            result.append(contentsOf: generateTone(frequency: freq, duration: duration))
             if index < frequencies.count - 1 {
                 result.append(contentsOf: [Float](repeating: 0, count: gapSamples))
             }
@@ -77,6 +77,18 @@ class SoundGenerator {
     func playStopSound() {
         // 660Hz -> 440Hz (descending)
         let samples = generateSequence(frequencies: [660, 440])
+        playSamples(samples)
+    }
+
+    func playErrorSound() {
+        // Three low falling tones, clearly different from start/stop
+        let samples = generateSequence(frequencies: [392, 311, 233], gap: 0.05, duration: 0.14)
+        playSamples(samples)
+    }
+
+    func playWarningSound() {
+        // Two short repeated mid tones
+        let samples = generateSequence(frequencies: [523, 523], gap: 0.06, duration: 0.08)
         playSamples(samples)
     }
 

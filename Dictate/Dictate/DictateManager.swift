@@ -33,6 +33,63 @@ enum DictationHotkey: String, CaseIterable {
     }
 }
 
+enum TranscriptionProvider: String, CaseIterable {
+    case groq = "groq"
+    case elevenLabs = "elevenlabs"
+
+    var label: String {
+        switch self {
+        case .groq:
+            return "Groq Whisper"
+        case .elevenLabs:
+            return "ElevenLabs Scribe"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .groq:
+            return "Groq"
+        case .elevenLabs:
+            return "ElevenLabs"
+        }
+    }
+
+    var keyFileName: String {
+        switch self {
+        case .groq:
+            return ".groq-api-key"
+        case .elevenLabs:
+            return ".elevenlabs-api-key"
+        }
+    }
+
+    var environmentKey: String {
+        switch self {
+        case .groq:
+            return "GROQ_API_KEY"
+        case .elevenLabs:
+            return "ELEVENLABS_API_KEY"
+        }
+    }
+
+    var keyHint: String {
+        switch self {
+        case .groq:
+            return "Get a free key at console.groq.com/keys"
+        case .elevenLabs:
+            return "Create a key at elevenlabs.io/app/settings/api-keys (needs Speech to Text access)"
+        }
+    }
+}
+
+/// Last problem shown in the menu bar until the next clean dictation or dismissal.
+struct DictateIssue: Equatable {
+    let message: String
+    let isWarning: Bool
+    let date: Date
+}
+
 @MainActor
 class DictateManager: ObservableObject {
     // MARK: - Published State
@@ -52,11 +109,16 @@ class DictateManager: ObservableObject {
     @Published var hotkey: DictationHotkey = .leftOption {
         didSet { saveConfig() }
     }
+    @Published var provider: TranscriptionProvider = .groq {
+        didSet { saveConfig() }
+    }
+    @Published private(set) var lastIssue: DictateIssue?
 
     // MARK: - Computed Properties
     var statusIcon: String {
         if isRecording { return "waveform.circle.fill" }
         if isProcessing { return "ellipsis.circle" }
+        if lastIssue != nil { return "exclamationmark.triangle.fill" }
         return "waveform"
     }
 
@@ -67,12 +129,17 @@ class DictateManager: ObservableObject {
     }
 
     var hasApiKey: Bool {
-        groqApiKey != nil
+        hasApiKey(for: provider)
+    }
+
+    func hasApiKey(for provider: TranscriptionProvider) -> Bool {
+        apiKeys[provider] != nil
     }
 
     // MARK: - Private
     private let audioRecorder = AudioRecorder()
-    private var groqApiKey: String?
+    private var apiKeys: [TranscriptionProvider: String] = [:]
+    private let requestTimeout: TimeInterval = 30
     private let configPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".dictate-config.json")
     private let vocabPath = FileManager.default.homeDirectoryForCurrentUser
@@ -82,36 +149,50 @@ class DictateManager: ObservableObject {
 
     // MARK: - Init
     init() {
-        loadApiKey()
+        loadApiKeys()
         loadConfig()
         loadVocabulary()
         requestNotificationPermission()
     }
 
     private func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
-    // MARK: - API Key
-    private let apiKeyPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".groq-api-key")
-
-    private func loadApiKey() {
-        groqApiKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"]
-
-        if groqApiKey == nil {
-            if let key = try? String(contentsOf: apiKeyPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-               !key.isEmpty {
-                groqApiKey = key
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                NSLog("Dictate: notification authorization failed: \(error.localizedDescription)")
+            } else if !granted {
+                NSLog("Dictate: notifications not allowed; errors are shown in the menu bar only")
             }
         }
     }
 
-    func setApiKey(_ key: String) {
+    // MARK: - API Keys
+    private func apiKeyPath(for provider: TranscriptionProvider) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(provider.keyFileName)
+    }
+
+    private func loadApiKeys() {
+        for provider in TranscriptionProvider.allCases {
+            if let envKey = ProcessInfo.processInfo.environment[provider.environmentKey], !envKey.isEmpty {
+                apiKeys[provider] = envKey
+            } else if let key = try? String(contentsOf: apiKeyPath(for: provider), encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !key.isEmpty {
+                apiKeys[provider] = key
+            }
+        }
+    }
+
+    func setApiKey(_ key: String, for provider: TranscriptionProvider) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        try? trimmed.write(to: apiKeyPath, atomically: true, encoding: .utf8)
-        groqApiKey = trimmed
+        let path = apiKeyPath(for: provider)
+        do {
+            try trimmed.write(to: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        } catch {
+            reportIssue("Could not save \(provider.shortName) API key: \(error.localizedDescription)")
+        }
+        apiKeys[provider] = trimmed
         objectWillChange.send()
     }
 
@@ -125,6 +206,7 @@ class DictateManager: ObservableObject {
         saveToClipboard = config.saveToClipboard
         language = Language(rawValue: config.language ?? "") ?? .auto
         hotkey = DictationHotkey(rawValue: config.hotkey ?? "") ?? .leftOption
+        provider = TranscriptionProvider(rawValue: config.provider ?? "") ?? .groq
     }
 
     private func saveConfig() {
@@ -132,10 +214,14 @@ class DictateManager: ObservableObject {
             correct: autoCorrect,
             language: language.rawValue.isEmpty ? nil : language.rawValue,
             saveToClipboard: saveToClipboard,
-            hotkey: hotkey.rawValue
+            hotkey: hotkey.rawValue,
+            provider: provider.rawValue
         )
-        if let data = try? JSONEncoder().encode(config) {
-            try? data.write(to: configPath)
+        do {
+            let data = try JSONEncoder().encode(config)
+            try data.write(to: configPath)
+        } catch {
+            NSLog("Dictate: saving config failed: \(error.localizedDescription)")
         }
     }
 
@@ -172,12 +258,29 @@ class DictateManager: ObservableObject {
         saveVocabulary()
     }
 
+    // MARK: - Issues
+    /// Makes a problem visible: menu bar icon, menu row, sound, notification (if allowed) and log.
+    func reportIssue(_ message: String, warning: Bool = false) {
+        NSLog("Dictate %@: %@", warning ? "warning" : "error", message)
+        lastIssue = DictateIssue(message: message, isWarning: warning, date: Date())
+        if warning {
+            SoundGenerator.shared.playWarningSound()
+        } else {
+            SoundGenerator.shared.playErrorSound()
+        }
+        showNotification(title: warning ? "Dictate Warning" : "Dictate Error", body: message)
+    }
+
+    func dismissIssue() {
+        lastIssue = nil
+    }
+
     // MARK: - Recording
     func startRecording() {
         guard !isRecording, !isProcessing else { return }
 
         guard hasApiKey else {
-            showNotification(title: "Dictate", body: "API Key missing — click menu bar icon to set it")
+            reportIssue("\(provider.shortName) API key missing. Open the menu and set it.")
             return
         }
 
@@ -186,12 +289,13 @@ class DictateManager: ObservableObject {
             break
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
-            showNotification(title: "Dictate", body: "Microphone permission requested — try again once granted")
+            reportIssue("Microphone permission requested. Try again once granted.", warning: true)
             return
         case .denied, .restricted:
-            showNotification(title: "Dictate", body: "Microphone access denied — enable in System Settings")
+            reportIssue("Microphone access denied. Enable Dictate in System Settings → Privacy & Security → Microphone.")
             return
         @unknown default:
+            reportIssue("Unknown microphone permission state.")
             return
         }
 
@@ -213,150 +317,216 @@ class DictateManager: ObservableObject {
     }
 
     private func processRecording() async {
-        defer {
-            Task { @MainActor in
-                isProcessing = false
-            }
-        }
+        defer { isProcessing = false }
 
         guard let audioData = audioRecorder.stopRecording() else {
-            showNotification(title: "Dictate", body: "No audio recorded")
+            reportIssue("No audio recorded. Check the microphone input.")
             return
         }
 
         // Check minimum duration (0.3 seconds at 16kHz = 4800 samples)
         if audioData.count < 4800 {
-            showNotification(title: "Dictate", body: "Hold Option longer")
+            reportIssue("Recording too short. Hold \(hotkey.holdLabel) a bit longer.", warning: true)
             return
         }
 
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".wav")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        var text: String
         do {
-            // Create temp WAV file
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString + ".wav")
             try writeWAV(audioData: audioData, to: tempURL)
-            defer { try? FileManager.default.removeItem(at: tempURL) }
-
-            // Transcribe
-            var text = try await transcribe(audioURL: tempURL)
-
-            // Auto-correct if enabled
-            if autoCorrect && !text.isEmpty {
-                text = try await correctText(text)
+            switch provider {
+            case .groq:
+                text = try await transcribeWithGroq(audioURL: tempURL)
+            case .elevenLabs:
+                text = try await transcribeWithElevenLabs(audioURL: tempURL)
             }
+        } catch {
+            reportIssue("Transcription failed (\(provider.shortName)): \(Self.describe(error))")
+            return
+        }
 
-            guard !text.isEmpty else { return }
+        guard !text.isEmpty else {
+            reportIssue("\(provider.shortName) returned no text. Nothing was pasted.", warning: true)
+            return
+        }
 
-            // Add to history
-            await MainActor.run {
-                history.insert(text, at: 0)
-                if history.count > historyMax {
-                    history.removeLast()
+        var warning: String?
+        if autoCorrect {
+            if apiKeys[.groq] == nil {
+                warning = "Auto-Correct skipped: no Groq API key. Raw text was pasted."
+            } else {
+                do {
+                    text = try await correctText(text)
+                } catch {
+                    warning = "Auto-Correct skipped (\(Self.describe(error))). Raw text was pasted."
                 }
             }
+        }
 
-            pasteTextSync(text)
+        history.insert(text, at: 0)
+        if history.count > historyMax {
+            history.removeLast()
+        }
 
-        } catch {
-            showNotification(title: "Dictate Error", body: error.localizedDescription)
+        if let pasteError = pasteText(text, keepInClipboard: saveToClipboard) {
+            reportIssue(pasteError)
+            return
+        }
+
+        if let warning {
+            reportIssue(warning, warning: true)
+        } else {
+            lastIssue = nil
         }
     }
 
-    private nonisolated func pasteTextSync(_ text: String) {
-        guard !text.isEmpty else { return }
+    /// Pastes via Cmd+V. Returns an error message when pasting could not be triggered.
+    private func pasteText(_ text: String, keepInClipboard: Bool) -> String? {
+        guard !text.isEmpty else { return nil }
 
         let pasteboard = NSPasteboard.general
-
-        // 1. Vorherigen Inhalt speichern
         let previous = pasteboard.string(forType: .string)
 
-        // 2. Text kopieren
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // 3. 0.1s warten
+        guard AXIsProcessTrusted() else {
+            return "Accessibility permission missing, so the text could not be pasted. It is in the clipboard and in History. Enable Dictate in System Settings → Privacy & Security → Accessibility."
+        }
+
         Thread.sleep(forTimeInterval: 0.1)
 
-        // 4. Cmd+V via osascript
         let process = Process()
+        let stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", "tell application \"System Events\" to keystroke \"v\" using command down"]
-        try? process.run()
-        process.waitUntilExit()
+        process.standardError = stderr
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "Paste failed: \(error.localizedDescription). The text is in the clipboard and in History."
+        }
 
-        // 5. 0.15s warten
+        if process.terminationStatus != 0 {
+            let detail = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "Paste failed (\(detail.isEmpty ? "osascript exit \(process.terminationStatus)" : detail)). The text is in the clipboard and in History. Allow Dictate to control System Events in System Settings → Privacy & Security → Automation."
+        }
+
+        guard !keepInClipboard else { return nil }
+
+        // Restore the previous clipboard after the paste went through.
         Thread.sleep(forTimeInterval: 0.15)
-
-        // 6. Clipboard wiederherstellen
         pasteboard.clearContents()
         pasteboard.setString(previous ?? "", forType: .string)
+        return nil
     }
 
-    // MARK: - Groq API
-    private func transcribe(audioURL: URL) async throws -> String {
-        guard let apiKey = groqApiKey else {
-            throw DictateError.noApiKey
+    // MARK: - Transcription APIs
+    private func transcribeWithGroq(audioURL: URL) async throws -> String {
+        guard let apiKey = apiKeys[.groq] else {
+            throw DictateError.noApiKey(.groq)
         }
 
-        let boundary = UUID().uuidString
+        var form = MultipartForm()
+        form.addField("model", "whisper-large-v3-turbo")
+        form.addField("response_format", "text")
+        if !language.rawValue.isEmpty {
+            form.addField("language", language.rawValue)
+        }
+        if !vocabulary.isEmpty {
+            form.addField("prompt", "Context terms: " + vocabulary.joined(separator: ", ") + ".")
+        }
+        form.addFile("file", filename: "audio.wav", contentType: "audio/wav", data: try Data(contentsOf: audioURL))
+
         var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/audio/transcriptions")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = form.finalized()
 
-        var body = Data()
-
-        // Model
-        body.append("--\(boundary)\r\n")
-        body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
-        body.append("whisper-large-v3-turbo\r\n")
-
-        // Response format
-        body.append("--\(boundary)\r\n")
-        body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n")
-        body.append("text\r\n")
-
-        // Language (if not auto)
-        if !language.rawValue.isEmpty {
-            body.append("--\(boundary)\r\n")
-            body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
-            body.append("\(language.rawValue)\r\n")
-        }
-
-        // Prompt (vocabulary context)
-        if !vocabulary.isEmpty {
-            let prompt = "Context terms: " + vocabulary.joined(separator: ", ") + "."
-            body.append("--\(boundary)\r\n")
-            body.append("Content-Disposition: form-data; name=\"prompt\"\r\n\r\n")
-            body.append("\(prompt)\r\n")
-        }
-
-        // Audio file
-        let audioData = try Data(contentsOf: audioURL)
-        body.append("--\(boundary)\r\n")
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n")
-        body.append("Content-Type: audio/wav\r\n\r\n")
-        body.append(audioData)
-        body.append("\r\n")
-
-        body.append("--\(boundary)--\r\n")
-
-        request.httpBody = body
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
-            let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw DictateError.apiError(errorText)
-        }
-
+        let data = try await send(request, provider: .groq)
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    private func transcribeWithElevenLabs(audioURL: URL) async throws -> String {
+        let audio = try Data(contentsOf: audioURL)
+        do {
+            return try await elevenLabsRequest(audio: audio, includeKeyterms: true)
+        } catch DictateError.apiError(_, let status, let body) where status == 400 && body.contains("keyword") {
+            // A vocabulary term ElevenLabs rejects must not block the dictation.
+            NSLog("Dictate: ElevenLabs rejected keyterms, retrying without: %@", body)
+            return try await elevenLabsRequest(audio: audio, includeKeyterms: false)
+        }
+    }
+
+    private func elevenLabsRequest(audio: Data, includeKeyterms: Bool) async throws -> String {
+        guard let apiKey = apiKeys[.elevenLabs] else {
+            throw DictateError.noApiKey(.elevenLabs)
+        }
+
+        var form = MultipartForm()
+        form.addField("model_id", "scribe_v2")
+        form.addField("tag_audio_events", "false")
+        if !language.rawValue.isEmpty {
+            form.addField("language_code", language.rawValue)
+        }
+        if includeKeyterms {
+            for term in vocabulary {
+                form.addField("keyterms", term)
+            }
+        }
+        form.addFile("file", filename: "audio.wav", contentType: "audio/wav", data: audio)
+
+        var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = form.finalized()
+
+        let data = try await send(request, provider: .elevenLabs)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = json["text"] as? String else {
+            throw DictateError.badResponse(.elevenLabs)
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func send(_ request: URLRequest, provider: TranscriptionProvider) async throws -> Data {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw DictateError.badResponse(provider)
+        }
+        guard http.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw DictateError.apiError(provider, status: http.statusCode, body: body)
+        }
+        return data
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return "request timed out. Check the network or VPN."
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "no internet connection."
+            default:
+                return urlError.localizedDescription
+            }
+        }
+        return error.localizedDescription
+    }
+
     private func correctText(_ text: String) async throws -> String {
-        guard let apiKey = groqApiKey else {
-            throw DictateError.noApiKey
+        guard let apiKey = apiKeys[.groq] else {
+            throw DictateError.noApiKey(.groq)
         }
 
         let termsStr = vocabulary.isEmpty ? "(none)" : vocabulary.joined(separator: ", ")
@@ -385,26 +555,22 @@ class DictateManager: ObservableObject {
 
         var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/chat/completions")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data = try await send(request, provider: .groq)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
-            // If correction fails, return original text
-            return text
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw DictateError.badResponse(.groq)
         }
 
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let choices = json["choices"] as? [[String: Any]],
-           let message = choices.first?["message"] as? [String: Any],
-           let content = message["content"] as? String {
-            return content.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return text
+        let corrected = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return corrected.isEmpty ? text : corrected
     }
 
     // MARK: - Audio
@@ -440,7 +606,11 @@ class DictateManager: ObservableObject {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                NSLog("Dictate: notification not delivered: \(error.localizedDescription)")
+            }
+        }
     }
 }
 
@@ -457,25 +627,55 @@ private extension Data {
     }
 }
 
+struct MultipartForm {
+    private let boundary = UUID().uuidString
+    private var body = Data()
+
+    var contentType: String { "multipart/form-data; boundary=\(boundary)" }
+
+    mutating func addField(_ name: String, _ value: String) {
+        body.append("--\(boundary)\r\n")
+        body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+        body.append("\(value)\r\n")
+    }
+
+    mutating func addFile(_ name: String, filename: String, contentType: String, data: Data) {
+        body.append("--\(boundary)\r\n")
+        body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n")
+        body.append("Content-Type: \(contentType)\r\n\r\n")
+        body.append(data)
+        body.append("\r\n")
+    }
+
+    func finalized() -> Data {
+        var result = body
+        result.append("--\(boundary)--\r\n")
+        return result
+    }
+}
+
 // MARK: - Models
 struct Config: Codable {
     var correct: Bool
     var language: String?
     var saveToClipboard: Bool
     var hotkey: String?
+    var provider: String?
 
     enum CodingKeys: String, CodingKey {
         case correct
         case language
         case saveToClipboard = "save_to_clipboard"
         case hotkey
+        case provider
     }
 
-    init(correct: Bool, language: String?, saveToClipboard: Bool, hotkey: String?) {
+    init(correct: Bool, language: String?, saveToClipboard: Bool, hotkey: String?, provider: String?) {
         self.correct = correct
         self.language = language
         self.saveToClipboard = saveToClipboard
         self.hotkey = hotkey
+        self.provider = provider
     }
 
     init(from decoder: Decoder) throws {
@@ -484,6 +684,7 @@ struct Config: Codable {
         language = try c.decodeIfPresent(String.self, forKey: .language) ?? nil
         saveToClipboard = try c.decodeIfPresent(Bool.self, forKey: .saveToClipboard) ?? false
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? nil
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? nil
     }
 }
 
@@ -508,18 +709,44 @@ struct WAVHeader {
 }
 
 enum DictateError: LocalizedError {
-    case noApiKey
-    case apiError(String)
-    case recordingFailed
+    case noApiKey(TranscriptionProvider)
+    case apiError(TranscriptionProvider, status: Int, body: String)
+    case badResponse(TranscriptionProvider)
 
     var errorDescription: String? {
         switch self {
-        case .noApiKey:
-            return "GROQ_API_KEY not set"
-        case .apiError(let message):
+        case .noApiKey(let provider):
+            return "\(provider.shortName) API key not set"
+        case .apiError(let provider, let status, let body):
+            var message = "HTTP \(status): \(Self.extractMessage(from: body))"
+            if provider == .groq && status == 403 {
+                message += " (Groq blocks VPN/datacenter IPs; pause the VPN or switch to ElevenLabs)"
+            }
+            if status == 401 {
+                message += " (check the \(provider.shortName) API key)"
+            }
             return message
-        case .recordingFailed:
-            return "Recording failed"
+        case .badResponse(let provider):
+            return "Unexpected response from \(provider.shortName)"
         }
+    }
+
+    /// Pulls the human-readable message out of Groq ({"error":{"message"}}) or
+    /// ElevenLabs ({"detail":{"message"}} or {"detail":"..."}) error bodies.
+    private static func extractMessage(from body: String) -> String {
+        if let data = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = json["error"] as? [String: Any], let message = error["message"] as? String {
+                return message
+            }
+            if let detail = json["detail"] as? [String: Any], let message = detail["message"] as? String {
+                return message
+            }
+            if let detail = json["detail"] as? String {
+                return detail
+            }
+        }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "no details" : String(trimmed.prefix(200))
     }
 }

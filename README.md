@@ -2,7 +2,7 @@
 
 Native macOS menu bar app for push-to-talk voice dictation. Hold **Option (⌥)** anywhere, speak, release — the transcribed text is pasted at the cursor.
 
-- Uses **Groq's `whisper-large-v3-turbo`** for transcription (free tier, very fast)
+- Transcribes with **Groq's `whisper-large-v3-turbo`** (free tier, very fast) or **ElevenLabs Scribe v2**, selectable in the menu
 - Optional LLM post-correction with custom vocabulary (`llama-3.3-70b-versatile`)
 - **Native Swift app** — no Terminal, no Python, no dependencies
 - Lives in the macOS menu bar — no Dock icon, no window
@@ -17,7 +17,7 @@ This is free, open source, and runs on Groq's free tier — which is generous en
 
 - macOS 14.0+ (Sonoma or newer)
 - Apple Silicon or Intel Mac
-- A free [Groq API key](https://console.groq.com/keys)
+- A free [Groq API key](https://console.groq.com/keys) and/or an [ElevenLabs API key](https://elevenlabs.io/app/settings/api-keys) with Speech to Text access
 
 ## Install
 
@@ -38,7 +38,7 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
 
 1. **Launch** `/Applications/Dictate.app`
 2. **Grant Accessibility permission** when prompted (System Settings → Privacy & Security → Accessibility → enable Dictate)
-3. **Set your API key**: Click the menu bar icon → "Set" next to API Key → paste your Groq key
+3. **Set your API key**: Click the menu bar icon → pick the Engine → "Set" next to the key → paste the key for that engine
 4. **Grant Microphone permission** when prompted on first recording
 
 ## Usage
@@ -49,6 +49,7 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
   - **Vocabulary** — opens a dedicated view for custom recognition terms
   - **Auto-Correct** — LLM post-processing to fix mis-hearings and remove filler words
   - **Save to Clipboard** — keep transcribed text in clipboard instead of restoring previous content
+  - **Engine** — Groq Whisper or ElevenLabs Scribe
   - **Language** — Auto / German / English
   - **Hotkey** — choose Left Option or Fn for push-to-talk
 
@@ -59,6 +60,10 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
 | `〰` | Idle — ready to record |
 | `◉` | Recording — speak now; menu bar icon turns red |
 | `…` | Processing — transcribing |
+| `⚠` red | Error — open the menu to see what failed (also plays a low falling tone) |
+| `⚠` orange | Warning — e.g. Auto-Correct skipped, raw text was pasted |
+
+Errors stay visible at the top of the menu until you dismiss them or the next dictation succeeds. If Groq answers `HTTP 403 Access denied`, it is blocking your IP (common with VPNs); switch the Engine to ElevenLabs or pause the VPN.
 
 ### Vocabulary
 
@@ -73,10 +78,10 @@ Saved at `~/.dictate-vocab.json`.
 
 Settings saved at `~/.dictate-config.json`:
 ```json
-{ "correct": false, "language": null, "save_to_clipboard": false, "hotkey": "left_option" }
+{ "correct": false, "language": null, "save_to_clipboard": false, "hotkey": "left_option", "provider": "groq" }
 ```
 
-API key saved at `~/.groq-api-key`.
+API keys saved at `~/.groq-api-key` and `~/.elevenlabs-api-key`. Auto-Correct always runs through Groq.
 
 ## Troubleshooting
 
