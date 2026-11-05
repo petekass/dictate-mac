@@ -3,7 +3,7 @@
 Native macOS menu bar app for push-to-talk voice dictation. Hold **Option (⌥)** anywhere, speak, release — the transcribed text is pasted at the cursor.
 
 - Transcribes with **Groq's `whisper-large-v3-turbo`** (free tier, very fast) or **ElevenLabs Scribe v2**, selectable in the menu
-- Optional LLM post-correction with custom vocabulary (`llama-3.3-70b-versatile`)
+- Optional LLM post-correction with custom vocabulary (`qwen/qwen3.8-27b` on Groq)
 - **Native Swift app** — no Terminal, no Python, no dependencies
 - Lives in the macOS menu bar — no Dock icon, no window
 - Works in any app (Slack, Mail, browser, editor…)

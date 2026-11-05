@@ -544,7 +544,10 @@ class DictateManager: ObservableObject {
             """
 
         let requestBody: [String: Any] = [
-            "model": "llama-3.3-70b-versatile",
+            // llama-3.3-70b-versatile was retired by Groq; qwen3.8-27b was the fastest
+            // and most accurate replacement in a Nov 2026 benchmark.
+            "model": "qwen/qwen3.8-27b",
+            "reasoning_effort": "none",
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text]
@@ -569,7 +572,9 @@ class DictateManager: ObservableObject {
             throw DictateError.badResponse(.groq)
         }
 
-        let corrected = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let corrected = content
+            .replacingOccurrences(of: "(?s)<think>.*?</think>", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return corrected.isEmpty ? text : corrected
     }
 
