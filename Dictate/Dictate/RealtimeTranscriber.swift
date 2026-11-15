@@ -112,9 +112,9 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         queue.sync {
             self.session = session
             self.task = task
+            task.resume()
+            self.receive()
         }
-        task.resume()
-        receive()
     }
 
     /// Safe to call from the audio thread: only copies samples onto the queue.
@@ -286,7 +286,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                 continuation.resume(returning: Result(text: transcript, forcedMidSpeechCommit: forcedMidSpeechCommit))
             }
         case "warning":
-            NSLog("Dictate realtime warning: %@", (json["warning"] as? String) ?? text)
+            appLog.notice("realtime warning: \((json["warning"] as? String) ?? "unknown", privacy: .public)")
         default:
             if let message = json["error"] as? String {
                 fail(RealtimeError.server(type: type, message: message))

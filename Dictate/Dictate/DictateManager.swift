@@ -3,6 +3,10 @@ import AVFoundation
 import AppKit
 import Combine
 import UserNotifications
+import os
+
+/// Public log lines (readable in Console / `log show`). Never pass dictated text here.
+let appLog = Logger(subsystem: "com.local.dictate", category: "app")
 
 enum Language: String, CaseIterable {
     case auto = ""
@@ -171,9 +175,9 @@ class DictateManager: ObservableObject {
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
-                NSLog("Dictate: notification authorization failed: \(error.localizedDescription)")
+                appLog.error("notification authorization failed: \(error.localizedDescription, privacy: .public)")
             } else if !granted {
-                NSLog("Dictate: notifications not allowed; errors are shown in the menu bar only")
+                appLog.notice("notifications not allowed; errors are shown in the menu bar only")
             }
         }
     }
@@ -235,7 +239,7 @@ class DictateManager: ObservableObject {
             let data = try JSONEncoder().encode(config)
             try data.write(to: configPath)
         } catch {
-            NSLog("Dictate: saving config failed: \(error.localizedDescription)")
+            appLog.error("saving config failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -275,7 +279,7 @@ class DictateManager: ObservableObject {
     // MARK: - Issues
     /// Makes a problem visible: menu bar icon, menu row, sound, notification (if allowed) and log.
     func reportIssue(_ message: String, warning: Bool = false) {
-        NSLog("Dictate %@: %@", warning ? "warning" : "error", message)
+        appLog.error("\(warning ? "warning" : "error", privacy: .public): \(message, privacy: .public)")
         lastIssue = DictateIssue(message: message, isWarning: warning, date: Date())
         if warning {
             SoundGenerator.shared.playWarningSound()
@@ -328,12 +332,14 @@ class DictateManager: ObservableObject {
             languageCode: language.rawValue.isEmpty ? nil : language.rawValue,
             keyterms: vocabulary
         ))
-        transcriber.onUpdate = { [weak self] committed, partial in
-            self?.livePreview.update(committed: committed, partial: partial)
+        transcriber.onUpdate = { [weak self, weak transcriber] committed, partial in
+            guard let self, let transcriber, self.liveTranscriber === transcriber else { return }
+            self.livePreview.update(committed: committed, partial: partial)
         }
-        transcriber.onFailure = { [weak self] error in
-            NSLog("Dictate: live stream failed while recording: %@", error.localizedDescription)
-            self?.livePreview.setNote("Live preview lost, transcribing on release")
+        transcriber.onFailure = { [weak self, weak transcriber] error in
+            guard let self, let transcriber, self.liveTranscriber === transcriber else { return }
+            appLog.error("live stream failed while recording: \(error.localizedDescription, privacy: .public)")
+            self.livePreview.setNote("Live preview lost, transcribing on release")
         }
         liveTranscriber = transcriber
         audioRecorder.onSamples = { [weak transcriber] samples in
@@ -389,7 +395,7 @@ class DictateManager: ObservableObject {
                 text = result.text
                 if result.forcedMidSpeechCommit {
                     // Rare (20 s of speech without a pause); the stream may have lost the tail.
-                    NSLog("Dictate: live stream committed mid-speech, using batch transcription")
+                    appLog.notice("live stream committed mid-speech, using batch transcription")
                     do {
                         text = try await transcribeBatch(audioData, with: .elevenLabs)
                     } catch {
@@ -398,7 +404,7 @@ class DictateManager: ObservableObject {
                 }
             } catch {
                 // The full recording is still here, so a failed stream costs only time.
-                NSLog("Dictate: live transcription failed, falling back to batch: %@", error.localizedDescription)
+                appLog.error("live transcription failed, falling back to batch: \(error.localizedDescription, privacy: .public)")
                 do {
                     text = try await transcribeBatch(audioData, with: .elevenLabs)
                     warning = "Live transcription failed (\(Self.describe(error))). Used the normal ElevenLabs transcription instead."
@@ -423,12 +429,12 @@ class DictateManager: ObservableObject {
 
         if autoCorrect {
             if apiKeys[.groq] == nil {
-                warning = "Auto-Correct skipped: no Groq API key. Raw text was pasted."
+                warning = Self.joinWarnings(warning, "Auto-Correct skipped: no Groq API key. Raw text was pasted.")
             } else {
                 do {
                     text = try await correctText(text)
                 } catch {
-                    warning = "Auto-Correct skipped (\(Self.describe(error))). Raw text was pasted."
+                    warning = Self.joinWarnings(warning, "Auto-Correct skipped (\(Self.describe(error))). Raw text was pasted.")
                 }
             }
         }
@@ -541,7 +547,7 @@ class DictateManager: ObservableObject {
             return try await elevenLabsRequest(audio: audio, includeKeyterms: true)
         } catch DictateError.apiError(_, let status, let body) where status == 400 && body.contains("keyword") {
             // A vocabulary term ElevenLabs rejects must not block the dictation.
-            NSLog("Dictate: ElevenLabs rejected keyterms, retrying without: %@", body)
+            appLog.error("ElevenLabs rejected keyterms, retrying without: \(body, privacy: .public)")
             return try await elevenLabsRequest(audio: audio, includeKeyterms: false)
         }
     }
@@ -589,6 +595,11 @@ class DictateManager: ObservableObject {
             throw DictateError.apiError(provider, status: http.statusCode, body: body)
         }
         return data
+    }
+
+    private static func joinWarnings(_ first: String?, _ second: String) -> String {
+        guard let first else { return second }
+        return first + " " + second
     }
 
     private static func describe(_ error: Error) -> String {
@@ -694,7 +705,7 @@ class DictateManager: ObservableObject {
         )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                NSLog("Dictate: notification not delivered: \(error.localizedDescription)")
+                appLog.error("notification not delivered: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
