@@ -36,7 +36,7 @@ private final class NonActivatingPanel: NSPanel {
 final class LivePreviewPanel {
     let model = LivePreviewModel()
     private var panel: NSPanel?
-    private let width: CGFloat = 560
+    private var hosting: NSHostingView<LivePreviewView>?
 
     func show() {
         model.reset()
@@ -69,7 +69,7 @@ final class LivePreviewPanel {
 
     private func makePanel() -> NSPanel {
         let panel = NonActivatingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: 80),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 200),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
@@ -78,34 +78,80 @@ final class LivePreviewPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // The window is larger than the card; an AppKit shadow would trace the transparent area
+        // and go stale as the card grows, so the card draws its own shadow.
+        panel.hasShadow = false
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
 
-        let hosting = NSHostingView(rootView: LivePreviewView(model: model, width: width))
-        hosting.sizingOptions = [.preferredContentSize]
+        let hosting = NSHostingView(rootView: LivePreviewView(model: model, layout: .init()))
+        // The window keeps the frame set in position(); content must never resize it,
+        // a window that followed its content grew off the bottom of the screen.
+        hosting.sizingOptions = []
         panel.contentView = hosting
+        self.hosting = hosting
         return panel
     }
 
-    /// Bottom centre of the screen with the mouse; the panel grows upwards from there.
+    /// A fixed window sized for the tallest card, at the bottom centre of the screen with the mouse.
+    /// The card sits at the bottom of it, so it grows upwards as text arrives.
     private func position(_ panel: NSPanel) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
-        panel.setFrameOrigin(NSPoint(x: visible.midX - width / 2, y: visible.minY + 48))
+        let margin = PreviewLayout.shadowMargin
+        let cardBottom = visible.minY + 48
+        let chrome = PreviewLayout.chromeHeight
+        let roomForText = visible.maxY - cardBottom - chrome - margin
+        let layout = PreviewLayout(
+            cardWidth: visible.width >= 1600 ? 720 : 560,
+            maxTextHeight: max(PreviewLayout.lineHeight, min(PreviewLayout.lineHeight * 8, roomForText))
+        )
+        let size = NSSize(width: layout.cardWidth + 2 * margin, height: layout.maxTextHeight + chrome + 2 * margin)
+        hosting?.rootView = LivePreviewView(model: model, layout: layout)
+        panel.setFrame(NSRect(x: visible.midX - size.width / 2, y: cardBottom - margin,
+                              width: size.width, height: size.height), display: false)
+    }
+}
+
+private struct PreviewLayout {
+    static let fontSize: CGFloat = 15
+    static let lineHeight = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize))
+    /// Header row, spacing and vertical padding of the card around the text.
+    static let chromeHeight: CGFloat = 52
+    /// Transparent border around the card that leaves room for its shadow.
+    static let shadowMargin: CGFloat = 24
+
+    var cardWidth: CGFloat = 560
+    var maxTextHeight: CGFloat = lineHeight * 8
+}
+
+private struct TextHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
 private struct LivePreviewView: View {
     @ObservedObject var model: LivePreviewModel
-    let width: CGFloat
+    let layout: PreviewLayout
+    @State private var textHeight: CGFloat = 0
 
-    /// Only the end of a long dictation is shown so the panel stays small.
-    private let maxCharacters = 320
+    /// Only the end of a long dictation is laid out; the top fade hides the start anyway.
+    private let maxCharacters = 2000
+    private let fadeHeight: CGFloat = 28
 
     var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            card
+        }
+        .padding(PreviewLayout.shadowMargin)
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
@@ -127,20 +173,44 @@ private struct LivePreviewView: View {
                         .lineLimit(1)
                 }
             }
-            text
-                .font(.system(size: 15))
-                .lineLimit(4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            textArea
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .frame(width: width, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(width: layout.cardWidth, alignment: .leading)
+        .background {
+            // Shadow on the background only, so the text does not cast one.
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08))
         )
+    }
+
+    /// The text keeps its full height and is pinned to the bottom of a frame of at most
+    /// `maxTextHeight`, so the newest line is always visible and older lines leave at the top.
+    private var textArea: some View {
+        let overflows = textHeight > layout.maxTextHeight
+        return text
+            .font(.system(size: PreviewLayout.fontSize))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: TextHeightKey.self, value: proxy.size.height)
+            })
+            .onPreferenceChange(TextHeightKey.self) { textHeight = $0 }
+            .frame(height: min(textHeight, layout.maxTextHeight), alignment: .bottom)
+            .clipped()
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: overflows ? fadeHeight : 0)
+                    Color.black
+                }
+            }
     }
 
     private var text: Text {
@@ -149,12 +219,21 @@ private struct LivePreviewView: View {
         if committed.isEmpty && partial.isEmpty {
             return Text(model.note == nil ? "Speak now…" : "Still recording…").foregroundColor(.secondary)
         }
-        // Trim from the front so the newest words stay visible.
-        let partialPart = String(partial.suffix(maxCharacters))
-        let committedPart = String(committed.suffix(max(0, maxCharacters - partialPart.count)))
-        let truncated = committedPart.count < committed.count || partialPart.count < partial.count
+        let partialPart = Self.wordTail(partial, limit: maxCharacters)
+        let committedPart = Self.wordTail(committed, limit: maxCharacters - partialPart.count)
         let separator = committedPart.isEmpty || partialPart.isEmpty ? "" : " "
-        return Text((truncated ? "…" : "") + committedPart + separator).foregroundColor(.primary)
-            + Text(partialPart).foregroundColor(.secondary)
+        // Label colours instead of .primary/.secondary: those blend with the material behind them,
+        // which breaks inside the fade mask (white text in light mode).
+        return Text(committedPart + separator).foregroundColor(Color(nsColor: .labelColor))
+            + Text(partialPart).foregroundColor(Color(nsColor: .secondaryLabelColor))
+    }
+
+    /// The last `limit` characters of `string`, starting at a word.
+    private static func wordTail(_ string: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard string.count > limit else { return string }
+        let tail = string.suffix(limit)
+        guard let space = tail.firstIndex(where: \.isWhitespace) else { return String(tail) }
+        return String(tail[tail.index(after: space)...])
     }
 }
