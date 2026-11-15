@@ -160,6 +160,10 @@ class DictateManager: ObservableObject {
     private var liveTranscriber: RealtimeTranscriber?
     private let liveFinishTimeout: TimeInterval = 4
     private var dictationID = 0
+    /// Smart spacing fallback when the focused field does not expose its text.
+    private var lastPasteApp: String?
+    private var lastPasteText = ""
+    private var userInputSinceLastPaste = true
     private var cancelRequested = false
     /// A forgotten hands-free recording must not run (and bill) forever.
     private let handsFreeLimit: TimeInterval = 10 * 60
@@ -496,16 +500,86 @@ class DictateManager: ObservableObject {
         }
 
         livePreview.hide()
-        if let pasteError = pasteText(text, keepInClipboard: saveToClipboard) {
+        let pasted = (needsLeadingSpace(before: text) ? " " : "") + text
+        if let pasteError = pasteText(pasted, keepInClipboard: saveToClipboard) {
             reportIssue(pasteError)
             return
         }
+        lastPasteApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        lastPasteText = text
+        userInputSinceLastPaste = false
 
         if let warning {
             reportIssue(warning, warning: true)
         } else {
             lastIssue = nil
         }
+    }
+
+    // MARK: - Smart spacing
+    /// Called by the keyboard tap for every real key press or click.
+    func noteUserInput() {
+        userInputSinceLastPaste = true
+    }
+
+    /// A space goes in front only on positive evidence: the focused field shows a
+    /// non-space character before the caret, or (if the field hides its text) nothing was
+    /// typed or clicked in the same app since Dictate's last paste.
+    private func needsLeadingSpace(before text: String) -> Bool {
+        guard let first = text.first, !",.;:!?)]}…".contains(first) else { return false }
+        switch Self.characterBeforeCaret() {
+        case .character(let previous):
+            return !previous.isWhitespace && !"([{\"'„“‚‘/-".contains(previous)
+        case .startOfText:
+            return false
+        case .unknown:
+            guard !userInputSinceLastPaste,
+                  let lastPasteApp,
+                  lastPasteApp == NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                  let last = lastPasteText.last else { return false }
+            return !last.isWhitespace
+        }
+    }
+
+    private enum CaretContext {
+        case character(Character)
+        case startOfText
+        case unknown
+    }
+
+    private static func characterBeforeCaret() -> CaretContext {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.25)
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return .unknown }
+        let element = focusedRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.25)
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return .unknown }
+        var range = CFRange()
+        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return .unknown }
+        if range.location <= 0 { return .startOfText }
+
+        var previous = CFRange(location: range.location - 1, length: 1)
+        if let previousValue = AXValueCreate(.cfRange, &previous) {
+            var stringRef: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString,
+                                                          previousValue, &stringRef) == .success,
+               let string = stringRef as? String, let character = string.last {
+                return .character(character)
+            }
+        }
+        // Some fields only expose their whole value.
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+              let value = valueRef as? String else { return .unknown }
+        let utf16 = Array(value.utf16)
+        guard range.location <= utf16.count,
+              let character = String(utf16CodeUnits: [utf16[range.location - 1]], count: 1).first else { return .unknown }
+        return .character(character)
     }
 
     /// Pastes via Cmd+V. Returns an error message when pasting could not be triggered.

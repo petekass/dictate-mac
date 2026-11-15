@@ -71,6 +71,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return .pass
             }
         }
+        keyboardTap.onUserInput = { [weak self] in
+            self?.dictateManager.noteUserInput()
+        }
         if !keyboardTap.start() {
             // Accessibility may be granted later; retry once it is.
             Task { @MainActor [weak self] in
