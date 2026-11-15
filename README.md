@@ -45,6 +45,9 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
 ## Usage
 
 - **Hold left Option (⌥)** → speak → release → text is pasted at the cursor
+- **Hands-free:** while holding the hotkey, tap **Space**; recording continues after you let go. Press the hotkey again to finish (stops by itself after 10 minutes)
+- **Esc** cancels a dictation while recording or transcribing; nothing is pasted and the Esc key does not reach the app
+- Consecutive dictations are separated by a space when the text before the cursor needs one
 - Click the menu bar icon for settings:
   - **History** — opens a dedicated view with recent transcriptions; click any entry to copy it
   - **Vocabulary** — opens a dedicated view for custom recognition terms

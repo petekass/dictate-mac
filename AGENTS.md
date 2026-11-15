@@ -34,7 +34,11 @@ Do not launch the app directly from `DerivedData`; that creates a second visible
 
 ## Current Behavior
 
-- Push-to-talk hotkey is configurable: Left Option or Fn.
+- Push-to-talk hotkey is configurable: Left Option or Fn. Hotkey handling works on press/release edges (`DictateApp.swift`).
+- `KeyboardTap.swift` is a session event tap (needs Accessibility). It swallows Esc only while recording or transcribing (cancel) and Space while the hotkey is held during a recording (hands-free), and reports real key presses/clicks for smart spacing. Do not use double-tap Fn for anything: macOS binds it to Apple Dictation by default.
+- Hands-free recordings stop after 10 minutes (`handsFreeLimit`).
+- Smart spacing (`needsLeadingSpace`): a leading space only when Accessibility shows a non-space character before the caret, or, for fields that hide their text, when nothing was typed or clicked in the same app since the last paste.
+- Logging uses `appLog` (os.Logger, public messages; read with `/usr/bin/log show --predicate 'subsystem == "com.local.dictate"'`). Never log dictated text.
 - The menu bar icon turns red only while `isRecording` is true.
 - History and Vocabulary open as dedicated menu pages, not disclosure menus.
 - Vocabulary terms are stored at `~/.dictate-vocab.json`.

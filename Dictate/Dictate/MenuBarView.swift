@@ -329,12 +329,28 @@ private struct VocabularyMenuPage: View {
                 .frame(height: 300)
             }
 
+            if let note = liveLimitNote {
+                Text(note)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
+
             Divider()
 
             Button("Edit All...", action: showVocabEditor)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
         }
+    }
+
+    /// ElevenLabs Live accepts at most 50 terms of up to 20 characters; the rest are skipped.
+    private var liveLimitNote: String? {
+        guard manager.provider == .elevenLabsLive else { return nil }
+        let skipped = manager.vocabulary.count - RealtimeTranscriber.usableKeyterms(manager.vocabulary).count
+        guard skipped > 0 else { return nil }
+        return "\(skipped) term\(skipped == 1 ? "" : "s") not used by ElevenLabs Live (max \(RealtimeTranscriber.maxKeyterms) terms, \(RealtimeTranscriber.maxKeytermLength) characters each)."
     }
 
     private var canAddTerm: Bool {
