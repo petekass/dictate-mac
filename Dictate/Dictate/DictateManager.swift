@@ -385,7 +385,17 @@ class DictateManager: ObservableObject {
         if let transcriber = liveTranscriber {
             livePreview.setFinishing()
             do {
-                text = try await transcriber.finish(timeout: liveFinishTimeout)
+                let result = try await transcriber.finish(timeout: liveFinishTimeout)
+                text = result.text
+                if result.forcedMidSpeechCommit {
+                    // Rare (20 s of speech without a pause); the stream may have lost the tail.
+                    NSLog("Dictate: live stream committed mid-speech, using batch transcription")
+                    do {
+                        text = try await transcribeBatch(audioData, with: .elevenLabs)
+                    } catch {
+                        warning = "Batch check failed (\(Self.describe(error))). Pasted the live transcript, which may miss words."
+                    }
+                }
             } catch {
                 // The full recording is still here, so a failed stream costs only time.
                 NSLog("Dictate: live transcription failed, falling back to batch: %@", error.localizedDescription)

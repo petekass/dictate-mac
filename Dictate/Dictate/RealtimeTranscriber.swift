@@ -56,20 +56,22 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var commitsSent = 0
     private var commitsReceived = 0
     private var samplesSinceCommit = 0
+    private var forcedMidSpeechCommit = false
     private var done = false
     private var committed: [String] = []
     private var partial = ""
     private var failure: Error?
-    private var continuation: CheckedContinuation<String, Error>?
+    private var continuation: CheckedContinuation<Result, Error>?
 
     /// 0.1 s at 16 kHz, the low end of the documented 0.1–1 s chunk range.
     private let chunkSamples = 1600
     /// Audio buffered while the socket opens; beyond this something is wrong.
     private let maxBufferedSamples = 16000 * 20
-    /// The server only keeps roughly the last 30 s of an uncommitted segment and drops
-    /// older speech, so long dictations commit in a pause after 20 s, at the latest at 28 s.
-    private let softCommitSamples = 16000 * 20
-    private let hardCommitSamples = 16000 * 28
+    /// The server only keeps roughly the last 25 s of an uncommitted segment and drops
+    /// older speech (a hard commit at 28 s lost a whole sentence in testing), so long
+    /// dictations commit in a pause after 15 s, at the latest at 20 s.
+    private let softCommitSamples = 16000 * 15
+    private let hardCommitSamples = 16000 * 20
     private let quietRMS: Double = 400
 
     static let maxKeyterms = 50
@@ -128,9 +130,16 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    struct Result {
+        let text: String
+        /// True when a commit had to cut into continuous speech. In testing the server then
+        /// sometimes dropped everything after the cut, so the caller should not trust `text`.
+        let forcedMidSpeechCommit: Bool
+    }
+
     /// Commits the last segment and returns the whole transcript.
-    func finish(timeout: TimeInterval) async throws -> String {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+    func finish(timeout: TimeInterval) async throws -> Result {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
             queue.async {
                 if let failure = self.failure {
                     continuation.resume(throwing: failure)
@@ -175,8 +184,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             pending.removeFirst(count)
             samplesSinceCommit += chunk.count
             let isFinal = commit && pending.isEmpty
-            let isIntermediate = !commit && (samplesSinceCommit >= hardCommitSamples
-                || (samplesSinceCommit >= softCommitSamples && Self.rms(chunk) < quietRMS))
+            let isHard = !commit && samplesSinceCommit >= hardCommitSamples
+            let isIntermediate = isHard
+                || (!commit && samplesSinceCommit >= softCommitSamples && Self.rms(chunk) < quietRMS)
+            if isHard { forcedMidSpeechCommit = true }
             send(chunk, commit: isFinal || isIntermediate)
             if isFinal || isIntermediate {
                 commitsSent += 1
@@ -194,10 +205,15 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private func sendCommit() {
         guard !commitSent else { return }
         commitSent = true
+        // The server rejects a commit with less than 0.3 s of uncommitted audio
+        // (commit_throttled), e.g. right after an intermediate commit; pad with silence.
+        // A commit also has to ride on an audio chunk, so never leave the buffer empty.
+        let minimumUncommitted = 5600
+        var padding = max(0, minimumUncommitted - samplesSinceCommit - pending.count)
         if pending.isEmpty {
-            // A commit has to ride on an audio chunk; 50 ms of silence carries it.
-            pending = Array(repeating: 0, count: 800)
+            padding = max(padding, 800)
         }
+        pending.append(contentsOf: repeatElement(0, count: padding))
         flush(commit: true)
     }
 
@@ -267,7 +283,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                 self.continuation = nil
                 done = true
                 close()
-                continuation.resume(returning: transcript)
+                continuation.resume(returning: Result(text: transcript, forcedMidSpeechCommit: forcedMidSpeechCommit))
             }
         case "warning":
             NSLog("Dictate realtime warning: %@", (json["warning"] as? String) ?? text)

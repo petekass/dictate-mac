@@ -68,10 +68,10 @@ Errors stay visible at the top of the menu until you dismiss them or the next di
 
 ### ElevenLabs Live
 
-With the **ElevenLabs Live** engine, audio is streamed to ElevenLabs Scribe v2 Realtime over a WebSocket while you hold the hotkey. A small panel at the bottom of the screen under the mouse shows the text as it is recognised (grey words may still change). On release the last segment is committed and the final text is pasted, usually within a quarter of a second, because the work is already done.
+With the **ElevenLabs Live** engine, audio is streamed to ElevenLabs Scribe v2 Realtime over a WebSocket while you hold the hotkey. A small panel at the bottom of the screen under the mouse shows the text as it is recognised (grey words may still change). On release only the last segment is committed, so the final text arrives about 0.2 s later (measured) instead of after a full upload, and is pasted right away.
 
 - Uses the same ElevenLabs API key as ElevenLabs Scribe. Streamed audio is billed by ElevenLabs, including pauses.
-- Long dictations are committed in a speech pause every 20–28 seconds; the realtime model otherwise forgets speech older than about 30 seconds.
+- Long dictations are committed in a speech pause after 15 seconds, at the latest after 20; the realtime model otherwise forgets speech older than about 25 seconds. If a commit had to cut into continuous speech (loud background noise), the full recording is transcribed again the normal way before pasting, which takes about a second longer.
 - If the stream fails, the full recording is transcribed the normal way and a warning is shown, so nothing is lost.
 - The panel never takes focus, so the paste still goes to the app you are typing in.
 - Vocabulary terms longer than 20 characters are not sent to the realtime API (its limit); at most 50 terms are used.

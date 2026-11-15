@@ -135,7 +135,7 @@ private struct LivePreviewView: View {
         let committed = model.committed
         let partial = model.partial
         if committed.isEmpty && partial.isEmpty {
-            return Text("Speak now…").foregroundColor(.secondary)
+            return Text(model.note == nil ? "Speak now…" : "Still recording…").foregroundColor(.secondary)
         }
         // Trim from the front so the newest words stay visible.
         let partialPart = String(partial.suffix(maxCharacters))
