@@ -109,6 +109,10 @@ class DictateManager: ObservableObject {
     // MARK: - Published State
     @Published var isRecording = false
     @Published var isProcessing = false
+    /// Recording continues after the hotkey is released; the next press stops it.
+    @Published private(set) var isHandsFree = false
+    /// Set by the hotkey handler; read by the keyboard tap (hold hotkey + Space = hands-free).
+    var hotkeyHeld = false
     @Published var history: [String] = []
     @Published var vocabulary: [String] = []
     @Published var autoCorrect: Bool = false {
@@ -155,6 +159,10 @@ class DictateManager: ObservableObject {
     private let livePreview = LivePreviewPanel()
     private var liveTranscriber: RealtimeTranscriber?
     private let liveFinishTimeout: TimeInterval = 4
+    private var dictationID = 0
+    private var cancelRequested = false
+    /// A forgotten hands-free recording must not run (and bill) forever.
+    private let handsFreeLimit: TimeInterval = 10 * 60
     private var apiKeys: [TranscriptionProvider: String] = [:]
     private let requestTimeout: TimeInterval = 30
     private let configPath = FileManager.default.homeDirectoryForCurrentUser
@@ -317,6 +325,9 @@ class DictateManager: ObservableObject {
             return
         }
 
+        dictationID += 1
+        cancelRequested = false
+        isHandsFree = false
         isRecording = true
         playStartSound()
         if provider == .elevenLabsLive {
@@ -357,10 +368,45 @@ class DictateManager: ObservableObject {
         livePreview.hide()
     }
 
+    /// Hold hotkey + Space: keep recording after release until the hotkey is pressed again.
+    func enterHandsFree() {
+        guard isRecording, !isHandsFree else { return }
+        isHandsFree = true
+        if liveTranscriber == nil {
+            livePreview.show()
+        }
+        livePreview.setHandsFree(hint: "hands-free, press \(hotkey.holdLabel) to finish, Esc to cancel")
+        let id = dictationID
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.handsFreeLimit ?? 600) * 1_000_000_000))
+            guard let self, self.dictationID == id, self.isRecording, self.isHandsFree else { return }
+            self.stopRecording()
+            self.reportIssue("Hands-free recording stopped after \(Int(self.handsFreeLimit / 60)) minutes.", warning: true)
+        }
+    }
+
+    /// Esc: drops the recording, or stops a running transcription before anything is pasted.
+    func cancelDictation() {
+        if isRecording {
+            isRecording = false
+            isHandsFree = false
+            _ = audioRecorder.stopRecording()
+            endLiveTranscription()
+            playStopSound()
+            appLog.notice("dictation cancelled while recording")
+        } else if isProcessing {
+            cancelRequested = true
+            endLiveTranscription()
+            playStopSound()
+            appLog.notice("dictation cancelled while transcribing")
+        }
+    }
+
     func stopRecording() {
         guard isRecording else { return }
 
         isRecording = false
+        isHandsFree = false
         isProcessing = true
         playStopSound()
 
@@ -403,6 +449,7 @@ class DictateManager: ObservableObject {
                     }
                 }
             } catch {
+                if cancelRequested { return }
                 // The full recording is still here, so a failed stream costs only time.
                 appLog.error("live transcription failed, falling back to batch: \(error.localizedDescription, privacy: .public)")
                 do {
@@ -422,6 +469,8 @@ class DictateManager: ObservableObject {
             }
         }
 
+        if cancelRequested { return }
+
         guard !text.isEmpty else {
             reportIssue("\(provider.shortName) returned no text. Nothing was pasted.", warning: true)
             return
@@ -438,6 +487,8 @@ class DictateManager: ObservableObject {
                 }
             }
         }
+
+        if cancelRequested { return }
 
         history.insert(text, at: 0)
         if history.count > historyMax {

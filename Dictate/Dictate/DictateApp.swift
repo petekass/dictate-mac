@@ -48,10 +48,38 @@ struct MenuBarIconView: View {
 class AppDelegate: NSObject, NSApplicationDelegate {
     let dictateManager = DictateManager()
     private var eventMonitor: Any?
+    private let keyboardTap = KeyboardTap()
+    private var hotkeyWasDown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestAccessibilityPermissions()
         setupGlobalHotkey()
+        setupKeyboardTap()
+    }
+
+    private func setupKeyboardTap() {
+        keyboardTap.onKeyDown = { [weak self] keyCode, _ in
+            guard let manager = self?.dictateManager else { return .pass }
+            switch keyCode {
+            case 53 where manager.isRecording || manager.isProcessing: // Esc
+                manager.cancelDictation()
+                return .swallow
+            case 49 where manager.isRecording && manager.hotkeyHeld: // Space while holding the hotkey
+                manager.enterHandsFree()
+                return .swallow
+            default:
+                return .pass
+            }
+        }
+        if !keyboardTap.start() {
+            // Accessibility may be granted later; retry once it is.
+            Task { @MainActor [weak self] in
+                for _ in 0..<60 {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if AXIsProcessTrusted(), self?.keyboardTap.start() == true { return }
+                }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -89,9 +117,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             hotkeyPressed = event.modifierFlags.contains(.function)
         }
 
-        if hotkeyPressed && !dictateManager.isRecording && !dictateManager.isProcessing {
-            dictateManager.startRecording()
-        } else if !hotkeyPressed && dictateManager.isRecording {
+        let pressedNow = hotkeyPressed && !hotkeyWasDown
+        let releasedNow = !hotkeyPressed && hotkeyWasDown
+        hotkeyWasDown = hotkeyPressed
+        dictateManager.hotkeyHeld = hotkeyPressed
+
+        if pressedNow {
+            if dictateManager.isRecording && dictateManager.isHandsFree {
+                dictateManager.stopRecording()
+            } else if !dictateManager.isRecording && !dictateManager.isProcessing {
+                dictateManager.startRecording()
+            }
+        } else if releasedNow && dictateManager.isRecording && !dictateManager.isHandsFree {
             dictateManager.stopRecording()
         }
     }

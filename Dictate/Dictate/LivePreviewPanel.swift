@@ -15,12 +15,14 @@ final class LivePreviewModel: ObservableObject {
     @Published var partial = ""
     @Published var phase: Phase = .listening
     @Published var note: String?
+    @Published var handsFreeHint: String?
 
     func reset() {
         committed = ""
         partial = ""
         phase = .listening
         note = nil
+        handsFreeHint = nil
     }
 }
 
@@ -55,6 +57,10 @@ final class LivePreviewPanel {
 
     func setNote(_ note: String) {
         model.note = note
+    }
+
+    func setHandsFree(hint: String) {
+        model.handsFreeHint = hint
     }
 
     func hide() {
@@ -108,6 +114,12 @@ private struct LivePreviewView: View {
                 Text(model.phase == .listening ? "Listening" : "Finishing…")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
+                if let hint = model.handsFreeHint, model.phase == .listening {
+                    Text("· " + hint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 if let note = model.note {
                     Text(note)
                         .font(.caption)
