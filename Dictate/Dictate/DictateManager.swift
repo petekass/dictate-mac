@@ -597,6 +597,7 @@ class DictateManager: ObservableObject {
         let caret: Int?
         let started = Date()
         var lastSnapshot: String?
+        var lowOverlapSince: Date?
     }
 
     /// Polls the field the text went into. Chat fields are emptied on send, so the last
@@ -625,8 +626,16 @@ class DictateManager: ObservableObject {
         let snapshot = Self.window(of: value, endingNear: state.caret, pastedLength: state.pasted.utf16.count)
         guard CorrectionLearner.overlap(pasted: state.pasted, edited: snapshot) >= 0.6 else {
             // The paste may not have landed yet; give the app a few seconds.
-            return state.lastSnapshot == nil && Date().timeIntervalSince(state.started) < 5
+            if state.lastSnapshot == nil {
+                return Date().timeIntervalSince(state.started) < 5
+            }
+            // A sample taken mid-edit can look rewritten; stop only if it stays that way.
+            let since = state.lowOverlapSince ?? Date()
+            state.lowOverlapSince = since
+            watchState = state
+            return Date().timeIntervalSince(since) < 2
         }
+        state.lowOverlapSince = nil
         state.lastSnapshot = snapshot
         watchState = state
         return true
