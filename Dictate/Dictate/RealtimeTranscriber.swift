@@ -99,9 +99,10 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
         return components.url!
     }
 
-    /// The realtime API accepts at most 50 keyterms of 20 characters each.
+    /// The realtime API accepts at most 50 keyterms of 20 characters each; the newest win,
+    /// so recently learned terms are not the first to be dropped.
     static func usableKeyterms(_ terms: [String]) -> [String] {
-        Array(terms.filter { !$0.isEmpty && $0.count <= maxKeytermLength }.prefix(maxKeyterms))
+        Array(terms.filter { !$0.isEmpty && $0.count <= maxKeytermLength }.suffix(maxKeyterms))
     }
 
     func start() {

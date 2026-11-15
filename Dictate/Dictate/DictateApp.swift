@@ -50,6 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventMonitor: Any?
     private let keyboardTap = KeyboardTap()
     private var hotkeyWasDown = false
+    private var inputMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestAccessibilityPermissions()
@@ -64,15 +65,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             case 53 where manager.isRecording || manager.isProcessing: // Esc
                 manager.cancelDictation()
                 return .swallow
-            case 49 where manager.isRecording && manager.hotkeyHeld: // Space while holding the hotkey
-                manager.enterHandsFree()
+            case 49 where manager.isRecording && manager.hotkeyHeld: // hotkey + Space toggles hands-free
+                if manager.isHandsFree {
+                    manager.stopRecording()
+                } else {
+                    manager.enterHandsFree()
+                }
                 return .swallow
             default:
                 return .pass
             }
         }
-        keyboardTap.onUserInput = { [weak self] in
-            self?.dictateManager.noteUserInput()
+        dictateManager.setKeyCaptureActive = { [weak self] active in
+            self?.keyboardTap.setActive(active)
+        }
+        // Passive: only notes that the user typed or clicked (smart spacing). Dictate's own
+        // Cmd+V paste is ignored.
+        inputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            if event.type == .keyDown, event.keyCode == 9, event.modifierFlags.contains(.command) { return }
+            Task { @MainActor in self?.dictateManager.noteUserInput() }
         }
         if !keyboardTap.start() {
             // Accessibility may be granted later; retry once it is.
@@ -125,10 +136,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyWasDown = hotkeyPressed
         dictateManager.hotkeyHeld = hotkeyPressed
 
+        // In hands-free mode a bare hotkey press does nothing: a lone Fn tap opens the emoji
+        // picker on many Macs. Hotkey + Space ends hands-free (see setupKeyboardTap).
         if pressedNow {
-            if dictateManager.isRecording && dictateManager.isHandsFree {
-                dictateManager.stopRecording()
-            } else if !dictateManager.isRecording && !dictateManager.isProcessing {
+            if !dictateManager.isRecording && !dictateManager.isProcessing {
                 dictateManager.startRecording()
             }
         } else if releasedNow && dictateManager.isRecording && !dictateManager.isHandsFree {

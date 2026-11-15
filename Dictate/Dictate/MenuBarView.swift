@@ -120,6 +120,11 @@ private struct MainMenuContent: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
 
+            Toggle("Learn from Corrections", isOn: $manager.learnFromCorrections)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .help("When you fix a misheard word right after dictating, the corrected spelling is added to the vocabulary")
+
             Picker("Engine", selection: $manager.provider) {
                 ForEach(TranscriptionProvider.allCases, id: \.self) { provider in
                     Text(provider.label).tag(provider)
@@ -303,6 +308,12 @@ private struct VocabularyMenuPage: View {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                         ForEach(manager.vocabulary, id: \.self) { term in
                             HStack(spacing: 6) {
+                                if manager.learnedTerms.contains(term) {
+                                    Image(systemName: "sparkles")
+                                        .font(.caption2)
+                                        .foregroundColor(.accentColor)
+                                        .help("Learned from a correction")
+                                }
                                 Text(term)
                                     .font(.callout)
                                     .lineLimit(2)
@@ -327,6 +338,14 @@ private struct VocabularyMenuPage: View {
                     .padding(.bottom, 12)
                 }
                 .frame(height: 300)
+            }
+
+            if !manager.learnedTerms.isEmpty {
+                Text("✦ \(manager.learnedTerms.count) learned from your corrections. Remove any that are wrong.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
             }
 
             if let note = liveLimitNote {

@@ -79,6 +79,12 @@ With the **ElevenLabs Live** engine, audio is streamed to ElevenLabs Scribe v2 R
 - The panel never takes focus, so the paste still goes to the app you are typing in.
 - Vocabulary terms longer than 20 characters are not sent to the realtime API (its limit); at most 50 terms are used.
 
+### Learning from corrections
+
+When you fix a misheard word right after a dictation (for example "Osbifo" → "Ospivo"), Dictate adds the corrected spelling to the vocabulary, marked with ✦. It watches the field it pasted into for up to three minutes (chat fields until you send) and only learns a single word replaced by a similarly spelled one, at most two per dictation. Rewritten sentences, deleted or added text, and words the macOS spell checker already knows teach nothing. The field text is compared in memory and never stored or logged. Turn it off with **Learn from Corrections** in the menu.
+
+This needs the app to expose its text field through Accessibility: native fields and T3 Code do; some apps may not.
+
 ### Vocabulary
 
 Add custom terms (names, technical words, company names) for better recognition:

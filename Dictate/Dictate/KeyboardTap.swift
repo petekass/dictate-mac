@@ -1,10 +1,10 @@
 import AppKit
 import CoreGraphics
 
-/// Session event tap that can swallow keys while a dictation runs (Esc to cancel, Space to
-/// switch to hands-free) and notices typing or clicks between dictations (smart spacing).
-/// An NSEvent monitor cannot swallow keys, and a stray Esc would e.g. interrupt a running
-/// turn in a terminal app.
+/// Session event tap that swallows keys while a dictation runs (Esc to cancel, Space for
+/// hands-free). An NSEvent monitor cannot swallow keys, and a stray Esc would e.g. interrupt
+/// a running task in a terminal app. The tap is only enabled during a dictation, so the
+/// keyboard never waits on Dictate otherwise.
 @MainActor
 final class KeyboardTap {
     enum KeyAction {
@@ -14,8 +14,6 @@ final class KeyboardTap {
 
     /// Return `.swallow` to keep the key from reaching the frontmost app.
     var onKeyDown: ((_ keyCode: Int64, _ flags: CGEventFlags) -> KeyAction)?
-    /// Any real key press or mouse click that was passed on.
-    var onUserInput: (() -> Void)?
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -24,9 +22,7 @@ final class KeyboardTap {
     @discardableResult
     func start() -> Bool {
         guard tap == nil else { return true }
-        let mask = (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.leftMouseDown.rawValue)
-            | (1 << CGEventType.rightMouseDown.rawValue)
+        let mask = 1 << CGEventType.keyDown.rawValue
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -35,33 +31,34 @@ final class KeyboardTap {
             callback: keyboardTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            appLog.error("keyboard tap unavailable; Esc cancel, hands-free and smart spacing are off")
+            appLog.error("keyboard tap unavailable; Esc cancel and hands-free are off")
             return false
         }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        CGEvent.tapEnable(tap: tap, enable: isActive)
         self.tap = tap
         self.source = source
         return true
     }
 
+    private var isActive = false
+
+    func setActive(_ active: Bool) {
+        isActive = active
+        if let tap { CGEvent.tapEnable(tap: tap, enable: active) }
+    }
+
     fileprivate func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let tap, isActive { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         case .keyDown:
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             if onKeyDown?(keyCode, event.flags) == .swallow {
                 return nil
             }
-            // Dictate's own Cmd+V paste is not user input.
-            if !(keyCode == 9 && event.flags.contains(.maskCommand)) {
-                onUserInput?()
-            }
-        case .leftMouseDown, .rightMouseDown:
-            onUserInput?()
         default:
             break
         }

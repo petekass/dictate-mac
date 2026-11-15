@@ -14,6 +14,8 @@
 		A10000A1232B0001 /* RealtimeTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000B1232B0001 /* RealtimeTranscriber.swift */; };
 		A10000A2232B0001 /* LivePreviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000B2232B0001 /* LivePreviewPanel.swift */; };
 		A10000A3232B0001 /* KeyboardTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000B3232B0001 /* KeyboardTap.swift */; };
+		A10000A5232B0001 /* FocusedText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000B5232B0001 /* FocusedText.swift */; };
+		A10000A4232B0001 /* CorrectionLearner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000B4232B0001 /* CorrectionLearner.swift */; };
 		A1000005232B0001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000015232B0001 /* Assets.xcassets */; };
 		A1000031232B0001 /* SoundGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000030232B0001 /* SoundGenerator.swift */; };
 /* End PBXBuildFile section */
@@ -27,6 +29,8 @@
 		A10000B1232B0001 /* RealtimeTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeTranscriber.swift; sourceTree = "<group>"; };
 		A10000B2232B0001 /* LivePreviewPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewPanel.swift; sourceTree = "<group>"; };
 		A10000B3232B0001 /* KeyboardTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardTap.swift; sourceTree = "<group>"; };
+		A10000B5232B0001 /* FocusedText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusedText.swift; sourceTree = "<group>"; };
+		A10000B4232B0001 /* CorrectionLearner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectionLearner.swift; sourceTree = "<group>"; };
 		A1000015232B0001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000016232B0001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000017232B0001 /* Dictate.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Dictate.entitlements; sourceTree = "<group>"; };
@@ -62,6 +66,8 @@
 				A10000B1232B0001 /* RealtimeTranscriber.swift */,
 				A10000B2232B0001 /* LivePreviewPanel.swift */,
 				A10000B3232B0001 /* KeyboardTap.swift */,
+				A10000B5232B0001 /* FocusedText.swift */,
+				A10000B4232B0001 /* CorrectionLearner.swift */,
 				A1000030232B0001 /* SoundGenerator.swift */,
 				A1000015232B0001 /* Assets.xcassets */,
 				A1000016232B0001 /* Info.plist */,
@@ -154,6 +160,8 @@
 				A10000A1232B0001 /* RealtimeTranscriber.swift in Sources */,
 				A10000A2232B0001 /* LivePreviewPanel.swift in Sources */,
 				A10000A3232B0001 /* KeyboardTap.swift in Sources */,
+				A10000A5232B0001 /* FocusedText.swift in Sources */,
+				A10000A4232B0001 /* CorrectionLearner.swift in Sources */,
 				A1000031232B0001 /* SoundGenerator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -121,6 +121,12 @@ class DictateManager: ObservableObject {
     @Published var saveToClipboard: Bool = false {
         didSet { saveConfig() }
     }
+    /// Learn vocabulary terms from the user's corrections of pasted dictations.
+    @Published var learnFromCorrections: Bool = true {
+        didSet { saveConfig() }
+    }
+    /// Vocabulary terms that were added automatically (shown marked in the Vocabulary page).
+    @Published private(set) var learnedTerms: [String] = []
     @Published var language: Language = .auto {
         didSet { saveConfig() }
     }
@@ -164,6 +170,9 @@ class DictateManager: ObservableObject {
     private var lastPasteApp: String?
     private var lastPasteText = ""
     private var userInputSinceLastPaste = true
+    /// Turns the Esc/Space key capture on only while a dictation runs.
+    var setKeyCaptureActive: ((Bool) -> Void)?
+    private var correctionWatch: Task<Void, Never>?
     private var cancelRequested = false
     /// A forgotten hands-free recording must not run (and bill) forever.
     private let handsFreeLimit: TimeInterval = 10 * 60
@@ -234,6 +243,7 @@ class DictateManager: ObservableObject {
         }
         autoCorrect = config.correct
         saveToClipboard = config.saveToClipboard
+        learnFromCorrections = config.learn ?? true
         language = Language(rawValue: config.language ?? "") ?? .auto
         hotkey = DictationHotkey(rawValue: config.hotkey ?? "") ?? .leftOption
         provider = TranscriptionProvider(rawValue: config.provider ?? "") ?? .groq
@@ -245,7 +255,8 @@ class DictateManager: ObservableObject {
             language: language.rawValue.isEmpty ? nil : language.rawValue,
             saveToClipboard: saveToClipboard,
             hotkey: hotkey.rawValue,
-            provider: provider.rawValue
+            provider: provider.rawValue,
+            learn: learnFromCorrections
         )
         do {
             let data = try JSONEncoder().encode(config)
@@ -262,10 +273,12 @@ class DictateManager: ObservableObject {
             return
         }
         vocabulary = vocab.terms
+        learnedTerms = (vocab.learned ?? []).filter { vocab.terms.contains($0) }
     }
 
     private func saveVocabulary() {
-        let vocab = Vocabulary(terms: vocabulary)
+        learnedTerms = learnedTerms.filter { vocabulary.contains($0) }
+        let vocab = Vocabulary(terms: vocabulary, learned: learnedTerms.isEmpty ? nil : learnedTerms)
         if let data = try? JSONEncoder().encode(vocab) {
             try? data.write(to: vocabPath)
         }
@@ -286,6 +299,25 @@ class DictateManager: ObservableObject {
     func setVocabulary(_ terms: [String]) {
         vocabulary = terms
         saveVocabulary()
+    }
+
+    /// Adds terms found in a correction. A learned term that only differs in case from an
+    /// existing one replaces it ("ospivo" -> "Ospivo").
+    private func learn(_ terms: [String]) {
+        var changed: [String] = []
+        for term in terms {
+            if vocabulary.contains(term) { continue }
+            if let index = vocabulary.firstIndex(where: { $0.lowercased() == term.lowercased() }) {
+                vocabulary[index] = term
+            } else {
+                vocabulary.append(term)
+            }
+            learnedTerms.append(term)
+            changed.append(term)
+        }
+        guard !changed.isEmpty else { return }
+        saveVocabulary()
+        appLog.notice("learned \(changed.count, privacy: .public) vocabulary term(s) from a correction")
     }
 
     // MARK: - Issues
@@ -329,10 +361,12 @@ class DictateManager: ObservableObject {
             return
         }
 
+        finishCorrectionWatch()
         dictationID += 1
         cancelRequested = false
         isHandsFree = false
         isRecording = true
+        setKeyCaptureActive?(true)
         playStartSound()
         if provider == .elevenLabsLive {
             startLiveTranscription()
@@ -379,7 +413,7 @@ class DictateManager: ObservableObject {
         if liveTranscriber == nil {
             livePreview.show()
         }
-        livePreview.setHandsFree(hint: "hands-free, press \(hotkey.holdLabel) to finish, Esc to cancel")
+        livePreview.setHandsFree(hint: "hands-free · \(hotkey.holdLabel)+Space to finish, Esc to cancel")
         let id = dictationID
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64((self?.handsFreeLimit ?? 600) * 1_000_000_000))
@@ -396,6 +430,7 @@ class DictateManager: ObservableObject {
             isHandsFree = false
             _ = audioRecorder.stopRecording()
             endLiveTranscription()
+            setKeyCaptureActive?(false)
             playStopSound()
             appLog.notice("dictation cancelled while recording")
         } else if isProcessing {
@@ -422,6 +457,7 @@ class DictateManager: ObservableObject {
     private func processRecording() async {
         defer {
             endLiveTranscription()
+            setKeyCaptureActive?(false)
             isProcessing = false
         }
 
@@ -500,6 +536,8 @@ class DictateManager: ObservableObject {
         }
 
         livePreview.hide()
+        // Our own Cmd+V must not pass through the key capture, and Esc no longer applies.
+        setKeyCaptureActive?(false)
         let pasted = (needsLeadingSpace(before: text) ? " " : "") + text
         if let pasteError = pasteText(pasted, keepInClipboard: saveToClipboard) {
             reportIssue(pasteError)
@@ -508,6 +546,9 @@ class DictateManager: ObservableObject {
         lastPasteApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         lastPasteText = text
         userInputSinceLastPaste = false
+        if learnFromCorrections {
+            startCorrectionWatch(pasted: text)
+        }
 
         if let warning {
             reportIssue(warning, warning: true)
@@ -516,8 +557,61 @@ class DictateManager: ObservableObject {
         }
     }
 
+    // MARK: - Learning from corrections
+    /// Polls the field the text went into. Chat fields are emptied on send, so the last
+    /// non-empty snapshot is what gets compared. The snapshot stays in memory only.
+    private func startCorrectionWatch(pasted: String) {
+        guard let element = FocusedText.element() else { return }
+        // Only the text around the paste is compared, so words elsewhere in a long document
+        // cannot distort the alignment. The caret sits at the end of the pasted text.
+        let pastedLength = pasted.utf16.count
+        let caret = FocusedText.selectedRange(of: element)?.location
+        correctionWatch = Task { [weak self] in
+            var lastSnapshot: String?
+            let deadline = Date().addingTimeInterval(180)
+            while !Task.isCancelled, Date() < deadline {
+                guard let value = FocusedText.value(of: element) else { break }
+                if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
+                lastSnapshot = Self.window(of: value, endingNear: caret, pastedLength: pastedLength)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            guard let self, let lastSnapshot else { return }
+            self.evaluateCorrection(pasted: pasted, edited: lastSnapshot)
+        }
+    }
+
+    /// Ends a running watch early (a new dictation starts) and evaluates what it has seen.
+    private func finishCorrectionWatch() {
+        correctionWatch?.cancel()
+        correctionWatch = nil
+    }
+
+    private static func window(of value: String, endingNear caret: Int?, pastedLength: Int) -> String {
+        let utf16 = Array(value.utf16)
+        guard let caret, utf16.count > pastedLength + 600 else { return value }
+        let start = max(0, min(caret, utf16.count) - pastedLength - 300)
+        let end = min(utf16.count, caret + 300)
+        guard start < end else { return value }
+        return String(decoding: utf16[start..<end], as: UTF16.self)
+    }
+
+    private func evaluateCorrection(pasted: String, edited: String) {
+        let terms = CorrectionLearner.learnedTerms(pasted: pasted, edited: edited, isKnownWord: Self.isKnownWord)
+        learn(terms)
+    }
+
+    private static func isKnownWord(_ word: String) -> Bool {
+        let checker = NSSpellChecker.shared
+        for language in ["de", "en"] {
+            let miss = checker.checkSpelling(of: word, startingAt: 0, language: language, wrap: false,
+                                             inSpellDocumentWithTag: 0, wordCount: nil)
+            if miss.location == NSNotFound { return true }
+        }
+        return false
+    }
+
     // MARK: - Smart spacing
-    /// Called by the keyboard tap for every real key press or click.
+    /// Called by a passive global monitor for every real key press or click.
     func noteUserInput() {
         userInputSinceLastPaste = true
     }
@@ -527,7 +621,7 @@ class DictateManager: ObservableObject {
     /// typed or clicked in the same app since Dictate's last paste.
     private func needsLeadingSpace(before text: String) -> Bool {
         guard let first = text.first, !",.;:!?)]}…".contains(first) else { return false }
-        switch Self.characterBeforeCaret() {
+        switch FocusedText.characterBeforeCaret() {
         case .character(let previous):
             return !previous.isWhitespace && !"([{\"'„“‚‘/-".contains(previous)
         case .startOfText:
@@ -539,47 +633,6 @@ class DictateManager: ObservableObject {
                   let last = lastPasteText.last else { return false }
             return !last.isWhitespace
         }
-    }
-
-    private enum CaretContext {
-        case character(Character)
-        case startOfText
-        case unknown
-    }
-
-    private static func characterBeforeCaret() -> CaretContext {
-        let systemWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(systemWide, 0.25)
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-              let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return .unknown }
-        let element = focusedRef as! AXUIElement
-        AXUIElementSetMessagingTimeout(element, 0.25)
-
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-              let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return .unknown }
-        var range = CFRange()
-        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return .unknown }
-        if range.location <= 0 { return .startOfText }
-
-        var previous = CFRange(location: range.location - 1, length: 1)
-        if let previousValue = AXValueCreate(.cfRange, &previous) {
-            var stringRef: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString,
-                                                          previousValue, &stringRef) == .success,
-               let string = stringRef as? String, let character = string.last {
-                return .character(character)
-            }
-        }
-        // Some fields only expose their whole value.
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
-              let value = valueRef as? String else { return .unknown }
-        let utf16 = Array(value.utf16)
-        guard range.location <= utf16.count,
-              let character = String(utf16CodeUnits: [utf16[range.location - 1]], count: 1).first else { return .unknown }
-        return .character(character)
     }
 
     /// Pastes via Cmd+V. Returns an error message when pasting could not be triggered.
@@ -883,6 +936,7 @@ struct Config: Codable {
     var saveToClipboard: Bool
     var hotkey: String?
     var provider: String?
+    var learn: Bool?
 
     enum CodingKeys: String, CodingKey {
         case correct
@@ -890,14 +944,16 @@ struct Config: Codable {
         case saveToClipboard = "save_to_clipboard"
         case hotkey
         case provider
+        case learn
     }
 
-    init(correct: Bool, language: String?, saveToClipboard: Bool, hotkey: String?, provider: String?) {
+    init(correct: Bool, language: String?, saveToClipboard: Bool, hotkey: String?, provider: String?, learn: Bool?) {
         self.correct = correct
         self.language = language
         self.saveToClipboard = saveToClipboard
         self.hotkey = hotkey
         self.provider = provider
+        self.learn = learn
     }
 
     init(from decoder: Decoder) throws {
@@ -907,11 +963,14 @@ struct Config: Codable {
         saveToClipboard = try c.decodeIfPresent(Bool.self, forKey: .saveToClipboard) ?? false
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? nil
         provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? nil
+        learn = try c.decodeIfPresent(Bool.self, forKey: .learn)
     }
 }
 
 struct Vocabulary: Codable {
     var terms: [String]
+    /// Subset of `terms` learned from corrections.
+    var learned: [String]?
 }
 
 struct WAVHeader {
