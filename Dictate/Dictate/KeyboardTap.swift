@@ -13,7 +13,7 @@ final class KeyboardTap {
     }
 
     /// Return `.swallow` to keep the key from reaching the frontmost app.
-    var onKeyDown: ((_ keyCode: Int64, _ flags: CGEventFlags) -> KeyAction)?
+    var onKeyDown: ((_ keyCode: Int64, _ flags: CGEventFlags, _ isRepeat: Bool) -> KeyAction)?
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -56,7 +56,8 @@ final class KeyboardTap {
             return Unmanaged.passUnretained(event)
         case .keyDown:
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            if onKeyDown?(keyCode, event.flags) == .swallow {
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if onKeyDown?(keyCode, event.flags, isRepeat) == .swallow {
                 return nil
             }
         default:

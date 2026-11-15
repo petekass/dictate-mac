@@ -27,8 +27,10 @@ enum FocusedText {
         var windowRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
               let windowRef, CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
+        // Bounded in elements and in time: this runs on the main thread.
         var budget = 4000
-        return findFocusedField(in: windowRef as! AXUIElement, depth: 0, budget: &budget)
+        let deadline = Date().addingTimeInterval(0.15)
+        return findFocusedField(in: windowRef as! AXUIElement, depth: 0, budget: &budget, deadline: deadline)
     }
 
     static func value(of element: AXUIElement) -> String? {
@@ -71,9 +73,10 @@ enum FocusedText {
         return .character(character)
     }
 
-    private static func findFocusedField(in element: AXUIElement, depth: Int, budget: inout Int) -> AXUIElement? {
+    private static func findFocusedField(in element: AXUIElement, depth: Int, budget: inout Int,
+                                         deadline: Date) -> AXUIElement? {
         budget -= 1
-        guard budget > 0, depth < 60 else { return nil }
+        guard budget > 0, depth < 60, Date() < deadline else { return nil }
         if let role = string(element, kAXRoleAttribute), textRoles.contains(role) {
             var focused: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXFocusedAttribute as CFString, &focused) == .success,
@@ -85,7 +88,7 @@ enum FocusedText {
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
               let children = childrenRef as? [AXUIElement] else { return nil }
         for child in children {
-            if let found = findFocusedField(in: child, depth: depth + 1, budget: &budget) {
+            if let found = findFocusedField(in: child, depth: depth + 1, budget: &budget, deadline: deadline) {
                 return found
             }
         }

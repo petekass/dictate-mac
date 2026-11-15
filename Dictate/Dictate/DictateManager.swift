@@ -27,6 +27,17 @@ enum DictationHotkey: String, CaseIterable {
         }
     }
 
+    /// Reads the hotkey from a key event's own flags, so a Space handled in the event tap
+    /// never depends on a modifier update that has not been processed yet.
+    func isHeld(in flags: CGEventFlags) -> Bool {
+        switch self {
+        case .leftOption:
+            return flags.rawValue & 0x20 != 0 // NX_DEVICELALTKEYMASK
+        case .fn:
+            return flags.contains(.maskSecondaryFn)
+        }
+    }
+
     var holdLabel: String {
         switch self {
         case .leftOption:
@@ -111,8 +122,6 @@ class DictateManager: ObservableObject {
     @Published var isProcessing = false
     /// Recording continues after the hotkey is released; the next press stops it.
     @Published private(set) var isHandsFree = false
-    /// Set by the hotkey handler; read by the keyboard tap (hold hotkey + Space = hands-free).
-    var hotkeyHeld = false
     @Published var history: [String] = []
     @Published var vocabulary: [String] = []
     @Published var autoCorrect: Bool = false {
@@ -123,7 +132,10 @@ class DictateManager: ObservableObject {
     }
     /// Learn vocabulary terms from the user's corrections of pasted dictations.
     @Published var learnFromCorrections: Bool = true {
-        didSet { saveConfig() }
+        didSet {
+            saveConfig()
+            if !learnFromCorrections { discardCorrectionWatch() }
+        }
     }
     /// Vocabulary terms that were added automatically (shown marked in the Vocabulary page).
     @Published private(set) var learnedTerms: [String] = []
@@ -173,6 +185,10 @@ class DictateManager: ObservableObject {
     /// Turns the Esc/Space key capture on only while a dictation runs.
     var setKeyCaptureActive: ((Bool) -> Void)?
     private var correctionWatch: Task<Void, Never>?
+    private var watchState: CorrectionWatchState?
+    private var processingTask: Task<Void, Never>?
+    /// When Dictate itself last sent Cmd+V; a physical Cmd+V counts as user input.
+    private(set) var lastSyntheticPaste = Date.distantPast
     private var cancelRequested = false
     /// A forgotten hands-free recording must not run (and bill) forever.
     private let handsFreeLimit: TimeInterval = 10 * 60
@@ -435,7 +451,11 @@ class DictateManager: ObservableObject {
             appLog.notice("dictation cancelled while recording")
         } else if isProcessing {
             cancelRequested = true
+            processingTask?.cancel()
+            processingTask = nil
             endLiveTranscription()
+            setKeyCaptureActive?(false)
+            isProcessing = false
             playStopSound()
             appLog.notice("dictation cancelled while transcribing")
         }
@@ -449,16 +469,26 @@ class DictateManager: ObservableObject {
         isProcessing = true
         playStopSound()
 
-        Task {
-            await processRecording()
+        let id = dictationID
+        processingTask = Task {
+            await processRecording(id: id)
         }
     }
 
-    private func processRecording() async {
+    /// True once Esc cancelled this transcription (a newer dictation may already run).
+    private var aborted: Bool {
+        Task.isCancelled || cancelRequested
+    }
+
+    private func processRecording(id: Int) async {
         defer {
-            endLiveTranscription()
-            setKeyCaptureActive?(false)
-            isProcessing = false
+            // A cancelled run must not tear down a newer dictation.
+            if dictationID == id {
+                endLiveTranscription()
+                setKeyCaptureActive?(false)
+                isProcessing = false
+                processingTask = nil
+            }
         }
 
         guard let audioData = audioRecorder.stopRecording() else {
@@ -489,13 +519,14 @@ class DictateManager: ObservableObject {
                     }
                 }
             } catch {
-                if cancelRequested { return }
+                if aborted { return }
                 // The full recording is still here, so a failed stream costs only time.
                 appLog.error("live transcription failed, falling back to batch: \(error.localizedDescription, privacy: .public)")
                 do {
                     text = try await transcribeBatch(audioData, with: .elevenLabs)
                     warning = "Live transcription failed (\(Self.describe(error))). Used the normal ElevenLabs transcription instead."
                 } catch let batchError {
+                    if aborted { return }
                     reportIssue("Transcription failed (ElevenLabs): \(Self.describe(batchError))")
                     return
                 }
@@ -504,12 +535,13 @@ class DictateManager: ObservableObject {
             do {
                 text = try await transcribeBatch(audioData, with: provider)
             } catch {
+                if aborted { return }
                 reportIssue("Transcription failed (\(provider.shortName)): \(Self.describe(error))")
                 return
             }
         }
 
-        if cancelRequested { return }
+        if aborted { return }
 
         guard !text.isEmpty else {
             reportIssue("\(provider.shortName) returned no text. Nothing was pasted.", warning: true)
@@ -523,12 +555,13 @@ class DictateManager: ObservableObject {
                 do {
                     text = try await correctText(text)
                 } catch {
+                    if aborted { return }
                     warning = Self.joinWarnings(warning, "Auto-Correct skipped (\(Self.describe(error))). Raw text was pasted.")
                 }
             }
         }
 
-        if cancelRequested { return }
+        if aborted { return }
 
         history.insert(text, at: 0)
         if history.count > historyMax {
@@ -558,32 +591,69 @@ class DictateManager: ObservableObject {
     }
 
     // MARK: - Learning from corrections
+    private struct CorrectionWatchState {
+        let element: AXUIElement
+        let pasted: String
+        let caret: Int?
+        let started = Date()
+        var lastSnapshot: String?
+    }
+
     /// Polls the field the text went into. Chat fields are emptied on send, so the last
-    /// non-empty snapshot is what gets compared. The snapshot stays in memory only.
+    /// snapshot that still holds the dictation is what gets compared. In memory only.
     private func startCorrectionWatch(pasted: String) {
         guard let element = FocusedText.element() else { return }
-        // Only the text around the paste is compared, so words elsewhere in a long document
-        // cannot distort the alignment. The caret sits at the end of the pasted text.
-        let pastedLength = pasted.utf16.count
-        let caret = FocusedText.selectedRange(of: element)?.location
+        // The caret sits at the end of the pasted text; only text around it is compared.
+        watchState = CorrectionWatchState(element: element, pasted: pasted,
+                                          caret: FocusedText.selectedRange(of: element)?.location)
         correctionWatch = Task { [weak self] in
-            var lastSnapshot: String?
             let deadline = Date().addingTimeInterval(180)
             while !Task.isCancelled, Date() < deadline {
-                guard let value = FocusedText.value(of: element) else { break }
-                if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
-                lastSnapshot = Self.window(of: value, endingNear: caret, pastedLength: pastedLength)
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let self, self.sampleCorrectionWatch() else { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
-            guard let self, let lastSnapshot else { return }
-            self.evaluateCorrection(pasted: pasted, edited: lastSnapshot)
+            guard !Task.isCancelled else { return }
+            self?.endCorrectionWatch()
         }
     }
 
-    /// Ends a running watch early (a new dictation starts) and evaluates what it has seen.
+    /// Takes one snapshot. Returns false when watching should stop: the field is gone or
+    /// empty (sent), or no longer holds the dictation (rewritten, or reused for a new message).
+    private func sampleCorrectionWatch() -> Bool {
+        guard var state = watchState, let value = FocusedText.value(of: state.element),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let snapshot = Self.window(of: value, endingNear: state.caret, pastedLength: state.pasted.utf16.count)
+        guard CorrectionLearner.overlap(pasted: state.pasted, edited: snapshot) >= 0.6 else {
+            // The paste may not have landed yet; give the app a few seconds.
+            return state.lastSnapshot == nil && Date().timeIntervalSince(state.started) < 5
+        }
+        state.lastSnapshot = snapshot
+        watchState = state
+        return true
+    }
+
+    /// A new dictation starts: take a last sample, then evaluate.
     private func finishCorrectionWatch() {
+        guard watchState != nil else { return }
+        _ = sampleCorrectionWatch()
+        endCorrectionWatch()
+    }
+
+    private func endCorrectionWatch() {
         correctionWatch?.cancel()
         correctionWatch = nil
+        guard let state = watchState else { return }
+        watchState = nil
+        if learnFromCorrections, let snapshot = state.lastSnapshot {
+            evaluateCorrection(pasted: state.pasted, edited: snapshot)
+        }
+    }
+
+    /// Learning was switched off: stop without evaluating.
+    private func discardCorrectionWatch() {
+        correctionWatch?.cancel()
+        correctionWatch = nil
+        watchState = nil
     }
 
     private static func window(of value: String, endingNear caret: Int?, pastedLength: Int) -> String {
@@ -596,6 +666,7 @@ class DictateManager: ObservableObject {
     }
 
     private func evaluateCorrection(pasted: String, edited: String) {
+        guard learnFromCorrections else { return }
         let terms = CorrectionLearner.learnedTerms(pasted: pasted, edited: edited, isKnownWord: Self.isKnownWord)
         learn(terms)
     }
@@ -651,6 +722,7 @@ class DictateManager: ObservableObject {
 
         Thread.sleep(forTimeInterval: 0.1)
 
+        lastSyntheticPaste = Date()
         let process = Process()
         let stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -822,7 +894,7 @@ class DictateManager: ObservableObject {
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text]
             ],
-            "max_tokens": 500,
+            "max_tokens": 2000,
             "temperature": 0.2
         ]
 
@@ -840,6 +912,10 @@ class DictateManager: ObservableObject {
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String else {
             throw DictateError.badResponse(.groq)
+        }
+        // A cut-off correction would silently drop the end of the dictation.
+        if (choices.first?["finish_reason"] as? String) == "length" {
+            throw DictateError.correctionTruncated
         }
 
         let corrected = content
@@ -993,9 +1069,13 @@ enum DictateError: LocalizedError {
     case noApiKey(TranscriptionProvider)
     case apiError(TranscriptionProvider, status: Int, body: String)
     case badResponse(TranscriptionProvider)
+    case correctionTruncated
 
     var errorDescription: String? {
         switch self {
+        case .correctionTruncated:
+            return "the corrected text was cut off"
+
         case .noApiKey(let provider):
             return "\(provider.shortName) API key not set"
         case .apiError(let provider, let status, let body):

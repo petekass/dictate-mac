@@ -78,6 +78,14 @@ enum CorrectionLearner {
         return after
     }
 
+    /// Share of the pasted words still present, in order, in the edited text.
+    static func overlap(pasted: String, edited: String) -> Double {
+        let original = words(in: pasted)
+        guard !original.isEmpty else { return 0 }
+        let matches = lcs(original.map(\.key), words(in: edited).map(\.key))
+        return Double(matches.count) / Double(original.count)
+    }
+
     /// Words keep inner dots, hyphens and underscores ("Next.js", "CLAUDE.md").
     static func words(in text: String) -> [Word] {
         var result: [Word] = []
