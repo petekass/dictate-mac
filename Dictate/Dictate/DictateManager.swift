@@ -479,9 +479,9 @@ class DictateManager: ObservableObject {
             do {
                 let result = try await transcriber.finish(timeout: liveFinishTimeout)
                 text = result.text
-                if result.forcedMidSpeechCommit {
-                    // Rare (20 s of speech without a pause); the stream may have lost the tail.
-                    appLog.notice("live stream committed mid-speech, using batch transcription")
+                if result.hadIntermediateCommit {
+                    // Long dictation: the stream may have lost everything after a commit.
+                    appLog.notice("long live dictation, using batch transcription for the pasted text")
                     do {
                         text = try await transcribeBatch(audioData, with: .elevenLabs)
                     } catch {

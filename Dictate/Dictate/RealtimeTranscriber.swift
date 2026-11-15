@@ -56,7 +56,8 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
     private var commitsSent = 0
     private var commitsReceived = 0
     private var samplesSinceCommit = 0
-    private var forcedMidSpeechCommit = false
+    private var hadIntermediateCommit = false
+    private var quietChunks = 0
     private var done = false
     private var committed: [String] = []
     private var partial = ""
@@ -133,9 +134,11 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
 
     struct Result {
         let text: String
-        /// True when a commit had to cut into continuous speech. In testing the server then
-        /// sometimes dropped everything after the cut, so the caller should not trust `text`.
-        let forcedMidSpeechCommit: Bool
+        /// True when the stream was committed before the end (dictations over ~15 s). After
+        /// such a commit the server sometimes returned nothing for the rest of the audio
+        /// (seen with microphone audio and with loud noise), so the caller should not trust
+        /// `text` and should transcribe the full recording instead.
+        let hadIntermediateCommit: Bool
     }
 
     /// Commits the last segment and returns the whole transcript.
@@ -185,10 +188,12 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
             pending.removeFirst(count)
             samplesSinceCommit += chunk.count
             let isFinal = commit && pending.isEmpty
-            let isHard = !commit && samplesSinceCommit >= hardCommitSamples
-            let isIntermediate = isHard
-                || (!commit && samplesSinceCommit >= softCommitSamples && Self.rms(chunk) < quietRMS)
-            if isHard { forcedMidSpeechCommit = true }
+            quietChunks = Self.rms(chunk) < quietRMS ? quietChunks + 1 : 0
+            // A pause is 0.3 s of quiet (three chunks); a single quiet chunk is often just
+            // the gap between two words.
+            let isIntermediate = !commit && (samplesSinceCommit >= hardCommitSamples
+                || (samplesSinceCommit >= softCommitSamples && quietChunks >= 3))
+            if isIntermediate { hadIntermediateCommit = true }
             send(chunk, commit: isFinal || isIntermediate)
             if isFinal || isIntermediate {
                 commitsSent += 1
@@ -284,7 +289,7 @@ final class RealtimeTranscriber: NSObject, URLSessionWebSocketDelegate {
                 self.continuation = nil
                 done = true
                 close()
-                continuation.resume(returning: Result(text: transcript, forcedMidSpeechCommit: forcedMidSpeechCommit))
+                continuation.resume(returning: Result(text: transcript, hadIntermediateCommit: hadIntermediateCommit))
             }
         case "warning":
             appLog.notice("realtime warning: \((json["warning"] as? String) ?? "unknown", privacy: .public)")
