@@ -7,6 +7,10 @@ class AudioRecorder {
     private let sampleRate: Double = 16000
     private let lock = NSLock()
 
+    /// Receives each converted 16 kHz chunk on the audio thread (used for live streaming).
+    /// Must only hand the samples off, never block.
+    var onSamples: (([Int16]) -> Void)?
+
     func startRecording() {
         audioBuffer = []
 
@@ -51,21 +55,22 @@ class AudioRecorder {
 
                 if status == .haveData, let int16Data = convertedBuffer.int16ChannelData {
                     let frameLength = Int(convertedBuffer.frameLength)
+                    let chunk = Array(UnsafeBufferPointer(start: int16Data[0], count: frameLength))
                     self.lock.lock()
-                    for i in 0..<frameLength {
-                        self.audioBuffer.append(int16Data[0][i])
-                    }
+                    self.audioBuffer.append(contentsOf: chunk)
                     self.lock.unlock()
+                    self.onSamples?(chunk)
                 }
             } else if let floatData = buffer.floatChannelData {
                 // Direct conversion if formats match enough
                 let frameLength = Int(buffer.frameLength)
-                self.lock.lock()
-                for i in 0..<frameLength {
-                    let sample = max(-1.0, min(1.0, floatData[0][i]))
-                    self.audioBuffer.append(Int16(sample * 32767))
+                let chunk = (0..<frameLength).map { i in
+                    Int16(max(-1.0, min(1.0, floatData[0][i])) * 32767)
                 }
+                self.lock.lock()
+                self.audioBuffer.append(contentsOf: chunk)
                 self.lock.unlock()
+                self.onSamples?(chunk)
             }
         }
 

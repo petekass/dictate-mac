@@ -3,6 +3,7 @@
 Native macOS menu bar app for push-to-talk voice dictation. Hold **Option (⌥)** anywhere, speak, release — the transcribed text is pasted at the cursor.
 
 - Transcribes with **Groq's `whisper-large-v3-turbo`** (free tier, very fast) or **ElevenLabs Scribe v2**, selectable in the menu
+- **ElevenLabs Live** engine streams audio while you speak, shows the text live in a small overlay and pastes it right after release
 - Optional LLM post-correction with custom vocabulary (`qwen/qwen3.8-27b` on Groq)
 - **Native Swift app** — no Terminal, no Python, no dependencies
 - Lives in the macOS menu bar — no Dock icon, no window
@@ -49,7 +50,7 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
   - **Vocabulary** — opens a dedicated view for custom recognition terms
   - **Auto-Correct** — LLM post-processing to fix mis-hearings and remove filler words
   - **Save to Clipboard** — keep transcribed text in clipboard instead of restoring previous content
-  - **Engine** — Groq Whisper or ElevenLabs Scribe
+  - **Engine** — Groq Whisper, ElevenLabs Scribe, or ElevenLabs Live (streaming with live preview)
   - **Language** — Auto / German / English
   - **Hotkey** — choose Left Option or Fn for push-to-talk
 
@@ -64,6 +65,16 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Dictate-*/Build/Products/Release/Dic
 | `⚠` orange | Warning — e.g. Auto-Correct skipped, raw text was pasted |
 
 Errors stay visible at the top of the menu until you dismiss them or the next dictation succeeds. If Groq answers `HTTP 403 Access denied`, it is blocking your IP (common with VPNs); switch the Engine to ElevenLabs or pause the VPN.
+
+### ElevenLabs Live
+
+With the **ElevenLabs Live** engine, audio is streamed to ElevenLabs Scribe v2 Realtime over a WebSocket while you hold the hotkey. A small panel at the bottom of the screen under the mouse shows the text as it is recognised (grey words may still change). On release the last segment is committed and the final text is pasted, usually within a quarter of a second, because the work is already done.
+
+- Uses the same ElevenLabs API key as ElevenLabs Scribe. Streamed audio is billed by ElevenLabs, including pauses.
+- Long dictations are committed in a speech pause every 20–28 seconds; the realtime model otherwise forgets speech older than about 30 seconds.
+- If the stream fails, the full recording is transcribed the normal way and a warning is shown, so nothing is lost.
+- The panel never takes focus, so the paste still goes to the app you are typing in.
+- Vocabulary terms longer than 20 characters are not sent to the realtime API (its limit); at most 50 terms are used.
 
 ### Vocabulary
 

@@ -36,6 +36,7 @@ enum DictationHotkey: String, CaseIterable {
 enum TranscriptionProvider: String, CaseIterable {
     case groq = "groq"
     case elevenLabs = "elevenlabs"
+    case elevenLabsLive = "elevenlabs_live"
 
     var label: String {
         switch self {
@@ -43,6 +44,8 @@ enum TranscriptionProvider: String, CaseIterable {
             return "Groq Whisper"
         case .elevenLabs:
             return "ElevenLabs Scribe"
+        case .elevenLabsLive:
+            return "ElevenLabs Live"
         }
     }
 
@@ -52,14 +55,21 @@ enum TranscriptionProvider: String, CaseIterable {
             return "Groq"
         case .elevenLabs:
             return "ElevenLabs"
+        case .elevenLabsLive:
+            return "ElevenLabs Live"
         }
+    }
+
+    /// The provider whose API key this engine uses; ElevenLabs Live shares the Scribe key.
+    var keyProvider: TranscriptionProvider {
+        self == .elevenLabsLive ? .elevenLabs : self
     }
 
     var keyFileName: String {
         switch self {
         case .groq:
             return ".groq-api-key"
-        case .elevenLabs:
+        case .elevenLabs, .elevenLabsLive:
             return ".elevenlabs-api-key"
         }
     }
@@ -68,7 +78,7 @@ enum TranscriptionProvider: String, CaseIterable {
         switch self {
         case .groq:
             return "GROQ_API_KEY"
-        case .elevenLabs:
+        case .elevenLabs, .elevenLabsLive:
             return "ELEVENLABS_API_KEY"
         }
     }
@@ -77,7 +87,7 @@ enum TranscriptionProvider: String, CaseIterable {
         switch self {
         case .groq:
             return "Get a free key at console.groq.com/keys"
-        case .elevenLabs:
+        case .elevenLabs, .elevenLabsLive:
             return "Create a key at elevenlabs.io/app/settings/api-keys (needs Speech to Text access)"
         }
     }
@@ -133,11 +143,14 @@ class DictateManager: ObservableObject {
     }
 
     func hasApiKey(for provider: TranscriptionProvider) -> Bool {
-        apiKeys[provider] != nil
+        apiKeys[provider.keyProvider] != nil
     }
 
     // MARK: - Private
     private let audioRecorder = AudioRecorder()
+    private let livePreview = LivePreviewPanel()
+    private var liveTranscriber: RealtimeTranscriber?
+    private let liveFinishTimeout: TimeInterval = 4
     private var apiKeys: [TranscriptionProvider: String] = [:]
     private let requestTimeout: TimeInterval = 30
     private let configPath = FileManager.default.homeDirectoryForCurrentUser
@@ -171,7 +184,7 @@ class DictateManager: ObservableObject {
     }
 
     private func loadApiKeys() {
-        for provider in TranscriptionProvider.allCases {
+        for provider in TranscriptionProvider.allCases where provider.keyProvider == provider {
             if let envKey = ProcessInfo.processInfo.environment[provider.environmentKey], !envKey.isEmpty {
                 apiKeys[provider] = envKey
             } else if let key = try? String(contentsOf: apiKeyPath(for: provider), encoding: .utf8)
@@ -182,7 +195,8 @@ class DictateManager: ObservableObject {
         }
     }
 
-    func setApiKey(_ key: String, for provider: TranscriptionProvider) {
+    func setApiKey(_ key: String, for engine: TranscriptionProvider) {
+        let provider = engine.keyProvider
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let path = apiKeyPath(for: provider)
@@ -301,7 +315,40 @@ class DictateManager: ObservableObject {
 
         isRecording = true
         playStartSound()
+        if provider == .elevenLabsLive {
+            startLiveTranscription()
+        }
         audioRecorder.startRecording()
+    }
+
+    private func startLiveTranscription() {
+        guard let apiKey = apiKeys[.elevenLabs] else { return }
+        let transcriber = RealtimeTranscriber(options: .init(
+            apiKey: apiKey,
+            languageCode: language.rawValue.isEmpty ? nil : language.rawValue,
+            keyterms: vocabulary
+        ))
+        transcriber.onUpdate = { [weak self] committed, partial in
+            self?.livePreview.update(committed: committed, partial: partial)
+        }
+        transcriber.onFailure = { [weak self] error in
+            NSLog("Dictate: live stream failed while recording: %@", error.localizedDescription)
+            self?.livePreview.setNote("Live preview lost, transcribing on release")
+        }
+        liveTranscriber = transcriber
+        audioRecorder.onSamples = { [weak transcriber] samples in
+            transcriber?.append(samples)
+        }
+        transcriber.start()
+        livePreview.show()
+    }
+
+    /// Runs on every exit path of a dictation so no socket or panel outlives it.
+    private func endLiveTranscription() {
+        audioRecorder.onSamples = nil
+        liveTranscriber?.cancel()
+        liveTranscriber = nil
+        livePreview.hide()
     }
 
     func stopRecording() {
@@ -317,7 +364,10 @@ class DictateManager: ObservableObject {
     }
 
     private func processRecording() async {
-        defer { isProcessing = false }
+        defer {
+            endLiveTranscription()
+            isProcessing = false
+        }
 
         guard let audioData = audioRecorder.stopRecording() else {
             reportIssue("No audio recorded. Check the microphone input.")
@@ -330,22 +380,30 @@ class DictateManager: ObservableObject {
             return
         }
 
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".wav")
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
         var text: String
-        do {
-            try writeWAV(audioData: audioData, to: tempURL)
-            switch provider {
-            case .groq:
-                text = try await transcribeWithGroq(audioURL: tempURL)
-            case .elevenLabs:
-                text = try await transcribeWithElevenLabs(audioURL: tempURL)
+        var warning: String?
+        if let transcriber = liveTranscriber {
+            livePreview.setFinishing()
+            do {
+                text = try await transcriber.finish(timeout: liveFinishTimeout)
+            } catch {
+                // The full recording is still here, so a failed stream costs only time.
+                NSLog("Dictate: live transcription failed, falling back to batch: %@", error.localizedDescription)
+                do {
+                    text = try await transcribeBatch(audioData, with: .elevenLabs)
+                    warning = "Live transcription failed (\(Self.describe(error))). Used the normal ElevenLabs transcription instead."
+                } catch let batchError {
+                    reportIssue("Transcription failed (ElevenLabs): \(Self.describe(batchError))")
+                    return
+                }
             }
-        } catch {
-            reportIssue("Transcription failed (\(provider.shortName)): \(Self.describe(error))")
-            return
+        } else {
+            do {
+                text = try await transcribeBatch(audioData, with: provider)
+            } catch {
+                reportIssue("Transcription failed (\(provider.shortName)): \(Self.describe(error))")
+                return
+            }
         }
 
         guard !text.isEmpty else {
@@ -353,7 +411,6 @@ class DictateManager: ObservableObject {
             return
         }
 
-        var warning: String?
         if autoCorrect {
             if apiKeys[.groq] == nil {
                 warning = "Auto-Correct skipped: no Groq API key. Raw text was pasted."
@@ -371,6 +428,7 @@ class DictateManager: ObservableObject {
             history.removeLast()
         }
 
+        livePreview.hide()
         if let pasteError = pasteText(text, keepInClipboard: saveToClipboard) {
             reportIssue(pasteError)
             return
@@ -427,6 +485,19 @@ class DictateManager: ObservableObject {
     }
 
     // MARK: - Transcription APIs
+    private func transcribeBatch(_ audioData: [Int16], with provider: TranscriptionProvider) async throws -> String {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".wav")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try writeWAV(audioData: audioData, to: tempURL)
+        switch provider {
+        case .groq:
+            return try await transcribeWithGroq(audioURL: tempURL)
+        case .elevenLabs, .elevenLabsLive:
+            return try await transcribeWithElevenLabs(audioURL: tempURL)
+        }
+    }
+
     private func transcribeWithGroq(audioURL: URL) async throws -> String {
         guard let apiKey = apiKeys[.groq] else {
             throw DictateError.noApiKey(.groq)

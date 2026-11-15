@@ -39,7 +39,8 @@ Do not launch the app directly from `DerivedData`; that creates a second visible
 - History and Vocabulary open as dedicated menu pages, not disclosure menus.
 - Vocabulary terms are stored at `~/.dictate-vocab.json`.
 - App settings are stored at `~/.dictate-config.json`.
-- Transcription engine is selectable in the menu ("Engine"): Groq Whisper or ElevenLabs Scribe v2 (`provider` in the config, default `groq`).
+- Transcription engine is selectable in the menu ("Engine"): Groq Whisper, ElevenLabs Scribe v2, or ElevenLabs Live (`provider` in the config: `groq` (default), `elevenlabs`, `elevenlabs_live`).
+- ElevenLabs Live (`RealtimeTranscriber.swift`, `LivePreviewPanel.swift`): streams 16 kHz PCM to `wss://api.elevenlabs.io/v1/speech-to-text/realtime` (`scribe_v2_realtime`, manual commits). The realtime model drops uncommitted speech older than ~30 s, so the client commits in a pause after 20 s and at the latest after 28 s; the final commit waits until every sent commit is answered. On any stream failure the recorder's full buffer is transcribed via the batch Scribe endpoint and a warning is shown. Live partials go to `LivePreviewModel`, never to `@Published` state on `DictateManager` (menu pickers leak on every redraw on macOS 26). `endLiveTranscription()` runs on every exit path so no socket or panel outlives a dictation.
 - API keys: `~/.groq-api-key` and `~/.elevenlabs-api-key` (or `GROQ_API_KEY` / `ELEVENLABS_API_KEY` env vars). Auto-Correct always uses Groq.
 - Errors are never silent: `reportIssue` plays an error sound, turns the menu bar icon into a red (error) or orange (warning) triangle, shows the message at the top of the menu until dismissed or the next clean dictation, posts a notification if allowed, and logs via NSLog.
 - If Auto-Correct fails, the raw transcription is still pasted and a warning is shown.
