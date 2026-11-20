@@ -94,23 +94,24 @@ final class LivePreviewPanel {
         return panel
     }
 
-    /// A fixed window sized for the tallest card, at the bottom centre of the screen with the mouse.
-    /// The card sits at the bottom of it, so it grows upwards as text arrives.
+    /// A fixed window sized for the tallest card, at the top centre of the screen with the mouse,
+    /// just below the menu bar. Chat apps keep their input at the bottom, so the card stays clear of it.
+    /// The card sits at the top of the window, so it grows downwards as text arrives.
     private func position(_ panel: NSPanel) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
         let margin = PreviewLayout.shadowMargin
-        let cardBottom = visible.minY + 48
+        let cardTop = visible.maxY - 8
         let chrome = PreviewLayout.chromeHeight
-        let roomForText = visible.maxY - cardBottom - chrome - margin
+        let roomForText = cardTop - visible.minY - chrome - margin - 48
         let layout = PreviewLayout(
             cardWidth: visible.width >= 1600 ? 720 : 560,
             maxTextHeight: max(PreviewLayout.lineHeight, min(PreviewLayout.lineHeight * 8, roomForText))
         )
         let size = NSSize(width: layout.cardWidth + 2 * margin, height: layout.maxTextHeight + chrome + 2 * margin)
         hosting?.rootView = LivePreviewView(model: model, layout: layout)
-        panel.setFrame(NSRect(x: visible.midX - size.width / 2, y: cardBottom - margin,
+        panel.setFrame(NSRect(x: visible.midX - size.width / 2, y: cardTop + margin - size.height,
                               width: size.width, height: size.height), display: false)
     }
 }
@@ -145,8 +146,8 @@ private struct LivePreviewView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
             card
+            Spacer(minLength: 0)
         }
         .padding(PreviewLayout.shadowMargin)
     }
