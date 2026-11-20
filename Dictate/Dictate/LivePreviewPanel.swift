@@ -106,7 +106,7 @@ final class LivePreviewPanel {
         let chrome = PreviewLayout.chromeHeight
         let roomForText = cardTop - visible.minY - chrome - margin - 48
         let layout = PreviewLayout(
-            cardWidth: visible.width >= 1600 ? 720 : 560,
+            cardWidth: visible.width >= 1600 ? 360 : 300,
             maxTextHeight: max(PreviewLayout.lineHeight, min(PreviewLayout.lineHeight * 8, roomForText))
         )
         let size = NSSize(width: layout.cardWidth + 2 * margin, height: layout.maxTextHeight + chrome + 2 * margin)
@@ -117,14 +117,14 @@ final class LivePreviewPanel {
 }
 
 private struct PreviewLayout {
-    static let fontSize: CGFloat = 15
+    static let fontSize: CGFloat = 13
     static let lineHeight = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize))
     /// Header row, spacing and vertical padding of the card around the text.
     static let chromeHeight: CGFloat = 52
     /// Transparent border around the card that leaves room for its shadow.
     static let shadowMargin: CGFloat = 24
 
-    var cardWidth: CGFloat = 560
+    var cardWidth: CGFloat = 300
     var maxTextHeight: CGFloat = lineHeight * 8
 }
 
